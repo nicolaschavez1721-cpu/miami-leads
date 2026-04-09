@@ -370,35 +370,51 @@ class ClerkAPIScraper:
             if isinstance(data, list):
                 items = data
             elif isinstance(data, dict):
-                for key in ["records", "results", "data", "items", "documents", "officialRecords"]:
+                # The portal returns recordingModels as the key
+                for key in ["recordingModels", "records", "results", "data", "items", "documents", "officialRecords"]:
                     if key in data and isinstance(data[key], list):
                         items = data[key]
+                        log.info(f"Found {len(items)} items under key '{key}'")
                         break
+                # Log first item structure for debugging
+                if items:
+                    log.info(f"First item keys: {list(items[0].keys()) if isinstance(items[0], dict) else items[0]}")
+                else:
+                    log.info(f"No items found. Response keys: {list(data.keys())}")
+                    # Log the full response for first doc type to understand structure
+                    log.info(f"Full response sample: {str(data)[:500]}")
 
             log.info(f"Items found: {len(items)}")
 
             for item in items:
                 try:
+                    # Log raw item for debugging first record
+                    if len(records) == 0:
+                        log.info(f"Raw item sample: {str(item)[:400]}")
+
                     def g(*keys):
                         for k in keys:
-                            v = item.get(k) or item.get(k.lower()) or item.get(k.upper())
-                            if v:
-                                return str(v).strip()
+                            # Try exact, lowercase, uppercase, camelCase variants
+                            for kk in [k, k.lower(), k.upper(), k[0].lower()+k[1:] if k else k]:
+                                v = item.get(kk)
+                                if v is not None and str(v).strip():
+                                    return str(v).strip()
                         return ""
 
-                    filed = g("recordedDate", "filedDate", "REC_DATE", "recordDate", "filed")
+                    # Field names from recordingModels - try common portal field patterns
+                    filed = g("recDate", "rec_date", "recordedDate", "filedDate", "REC_DATE", "recordDate", "filed", "date")
                     try:
-                        filed = datetime.fromisoformat(filed.replace("Z","")).strftime("%Y-%m-%d")
+                        filed = datetime.fromisoformat(str(filed).replace("Z","").replace("T"," ").split(".")[0]).strftime("%Y-%m-%d")
                     except Exception:
-                        for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+                        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
                             try:
-                                filed = datetime.strptime(filed[:10], fmt).strftime("%Y-%m-%d")
+                                filed = datetime.strptime(str(filed)[:10], fmt).strftime("%Y-%m-%d")
                                 break
                             except Exception:
                                 pass
 
                     amount = None
-                    raw = g("consideration", "amount", "CONSIDERATION_1", "considerationAmount")
+                    raw = g("consideration", "consideration1", "CONSIDERATION_1", "amount", "considerationAmount")
                     if raw:
                         try:
                             amount = float(re.sub(r"[^\d.]", "", raw))
@@ -407,11 +423,14 @@ class ClerkAPIScraper:
                         except Exception:
                             pass
 
-                    cfn_year = g("CFN_YEAR", "cfnYear", "year")
-                    cfn_seq  = g("CFN_SEQ", "cfnSeq", "cfn", "documentNumber", "instrumentNumber")
-                    doc_num  = f"{cfn_year}-{cfn_seq}" if cfn_year and cfn_seq else cfn_seq or g("id", "recordId")
+                    cfn_year = g("cfnYear", "cfN_YEAR", "CFN_YEAR", "year", "docYear")
+                    cfn_seq  = g("cfnSeq", "cfN_SEQ", "CFN_SEQ", "cfn", "seq", "documentNumber", "instrumentNumber", "docNum")
+                    doc_num  = f"{cfn_year}-{cfn_seq}" if cfn_year and cfn_seq else cfn_seq or g("id", "recordId", "cfnMasterId")
 
-                    clerk_url = f"https://onlineservices.miamidadeclerk.gov/officialrecords/DocumentDetail.aspx?cfn={doc_num}"
+                    # Build clerk URL
+                    clerk_url = g("url", "documentUrl", "link")
+                    if not clerk_url:
+                        clerk_url = f"https://onlineservices.miamidadeclerk.gov/officialrecords/DocumentDetail.aspx?cfn={doc_num}"
 
                     records.append({
                         "doc_num":      doc_num,
@@ -419,14 +438,14 @@ class ClerkAPIScraper:
                         "filed":        filed,
                         "cat":          cat,
                         "cat_label":    CAT_LABELS.get(cat, cat),
-                        "owner":        g("FIRST_PARTY", "grantor", "owner", "grantorName"),
-                        "grantee":      g("SECOND_PARTY", "grantee", "granteeName"),
+                        "owner":        g("firstParty", "FIRST_PARTY", "grantor", "owner", "grantorName", "partyName"),
+                        "grantee":      g("secondParty", "SECOND_PARTY", "grantee", "granteeName"),
                         "amount":       amount,
-                        "legal":        g("LEGAL_DESCRIPTION", "legalDescription", "legal"),
-                        "prop_address": g("siteAddress", "propertyAddress", "address"),
-                        "prop_city":    g("siteCity", "city"),
+                        "legal":        g("legalDescription", "LEGAL_DESCRIPTION", "legal", "legalDesc"),
+                        "prop_address": g("siteAddress", "propertyAddress", "address", "siteAddr"),
+                        "prop_city":    g("siteCity", "city", "propertyCity"),
                         "prop_state":   "FL",
-                        "prop_zip":     g("siteZip", "zip"),
+                        "prop_zip":     g("siteZip", "zip", "propertyZip"),
                         "mail_address": "",
                         "mail_city":    "",
                         "mail_state":   "",
