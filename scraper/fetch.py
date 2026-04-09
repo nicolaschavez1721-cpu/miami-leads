@@ -130,141 +130,181 @@ def compute_score_and_flags(record: dict) -> tuple:
     return min(score, 100), list(dict.fromkeys(flags))
 
 # ─────────────────────────────────────────────
-# PROPERTY APPRAISER LOOKUP
+# PROPERTY APPRAISER LOOKUP (JSON API)
 # ─────────────────────────────────────────────
 class PALookup:
     """Looks up property and mailing address from Miami-Dade PA by folio number.
-    Scrapes the HTML property search page since the PA uses server-side rendering.
+
+    Uses the PA propertysearch JSON API (the Angular SPA's backend):
+      https://www.miamidade.gov/Apps/PA/propertysearch/api/Property/{folio}
+
+    The old HTML scraper approach failed because both PA URLs serve an Angular
+    SPA — the HTML is just a JS bootstrap shell, so BeautifulSoup finds nothing.
+    This class calls the underlying JSON API directly.
     """
+
+    PA_API_URL = "https://www.miamidade.gov/Apps/PA/propertysearch/api/Property/{folio}"
+    RATE_LIMIT_DELAY = 0.35  # seconds between requests
 
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
+                          "AppleWebKit/537.36 (KHTML, like Gecko) "
+                          "Chrome/124.0.0.0 Safari/537.36",
+            "Accept": "application/json",
             "Accept-Language": "en-US,en;q=0.9",
+            "Referer": "https://www.miamidade.gov/Apps/PA/propertysearch/",
         })
         self.cache = {}
+        self.stats = {"hits": 0, "misses": 0, "errors": 0}
 
-    def _format_folio(self, folio: str) -> str:
-        """Format folio to 13 digits no dashes for URL."""
-        return re.sub(r"[^0-9]", "", str(folio)).zfill(13)
+    @staticmethod
+    def format_folio(folio: str) -> str:
+        """Strip non-digits and zero-pad to 13 digits.
+
+        Clerk records return 12-digit folios like '722210031920'.
+        PA API expects 13 digits: '0722210031920'.
+        """
+        digits = re.sub(r"[^0-9]", "", str(folio))
+        return digits.zfill(13)
 
     def lookup(self, folio: str) -> dict:
+        import time
+
         if not folio or str(folio).strip() in ("", "None", "null", "0"):
             return {}
 
-        folio_clean = self._format_folio(folio)
+        folio_clean = self.format_folio(folio)
         if len(folio_clean) < 8:
             return {}
 
         if folio_clean in self.cache:
             return self.cache[folio_clean]
 
-        result = {}
-
-        # Try the PA property search HTML page
-        urls = [
-            f"https://appsmiamidadepa.gov/PropertySearch/?folio={folio_clean}",
-            f"https://www.miamidade.gov/Apps/PA/propertysearch/?folio={folio_clean}",
-        ]
-
-        for url in urls:
-            try:
-                r = self.session.get(url, timeout=15, allow_redirects=True)
-                if r.status_code == 200 and len(r.text) > 500:
-                    result = self._parse_pa_html(r.text)
-                    if result.get("prop_address"):
-                        log.info(f"PA HTML hit for {folio_clean}: {result['prop_address']}")
-                        break
-            except Exception as e:
-                log.debug(f"PA HTML error {url}: {e}")
-
+        result = self._call_pa_api(folio_clean)
         self.cache[folio_clean] = result
-        if not result.get("prop_address"):
-            log.debug(f"PA no result for folio: {folio_clean}")
+
+        if result.get("prop_address"):
+            self.stats["hits"] += 1
+            log.info(f"PA hit {folio_clean}: {result['prop_address']}, {result.get('prop_city','')}")
+        else:
+            self.stats["misses"] += 1
+            log.debug(f"PA miss for folio: {folio_clean}")
+
+        time.sleep(self.RATE_LIMIT_DELAY)
         return result
 
-    def _parse_pa_html(self, html: str) -> dict:
-        """Parse property address and mailing address from PA HTML page."""
-        from bs4 import BeautifulSoup
-        soup = BeautifulSoup(html, "lxml")
+    def _call_pa_api(self, folio: str) -> dict:
+        """Call the PA JSON API and parse the response."""
+        url = self.PA_API_URL.format(folio=folio)
 
-        def find_field(labels):
-            for label in labels:
-                # Look for label text then get sibling/next value
-                el = soup.find(string=re.compile(label, re.I))
-                if el:
-                    parent = el.find_parent()
-                    if parent:
-                        # Try next sibling
-                        nxt = parent.find_next_sibling()
-                        if nxt:
-                            val = nxt.get_text(strip=True)
-                            if val and len(val) > 2:
-                                return val
-                        # Try parent's next sibling
-                        nxt2 = parent.find_parent()
-                        if nxt2:
-                            nxt3 = nxt2.find_next_sibling()
-                            if nxt3:
-                                val = nxt3.get_text(strip=True)
-                                if val and len(val) > 2:
-                                    return val
-            return ""
+        try:
+            r = self.session.get(url, timeout=15)
 
-        # PA page structure: label divs followed by value divs
-        prop_addr = ""
-        mail_addr = ""
-        mail_city_state_zip = ""
+            if r.status_code == 404:
+                log.debug(f"PA 404 for folio {folio}")
+                return {}
+            if r.status_code != 200:
+                log.warning(f"PA API {r.status_code} for folio {folio}")
+                self.stats["errors"] += 1
+                return {}
 
-        # Find all text blocks that look like addresses
-        all_text = [el.get_text(strip=True) for el in soup.find_all(["div", "p", "span", "td"]) if el.get_text(strip=True)]
+            data = r.json()
+            if not data or isinstance(data, str):
+                return {}
 
-        for i, text in enumerate(all_text):
-            tl = text.lower()
-            if "property address" in tl and i + 1 < len(all_text):
-                prop_addr = all_text[i + 1]
-            elif "mailing address" in tl and i + 1 < len(all_text):
-                mail_addr = all_text[i + 1]
-                if i + 2 < len(all_text):
-                    mail_city_state_zip = all_text[i + 2]
+            return self._parse_pa_json(data)
 
-        # Parse city/state/zip from mail address line
-        mail_city, mail_state, mail_zip = "", "FL", ""
-        if mail_city_state_zip:
-            # Format: "MIAMI SHORES, FL 33138-2923"
-            m = re.match(r"^(.+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)", mail_city_state_zip)
-            if m:
-                mail_city  = m.group(1).strip()
-                mail_state = m.group(2)
-                mail_zip   = m.group(3)
+        except requests.exceptions.RequestException as e:
+            log.warning(f"PA API error for {folio}: {e}")
+            self.stats["errors"] += 1
+            return {}
+        except (ValueError, KeyError) as e:
+            log.warning(f"PA parse error for {folio}: {e}")
+            self.stats["errors"] += 1
+            return {}
 
-        # Parse city from prop_addr if it has multiple lines
-        prop_city = ""
-        if "\n" in prop_addr or len(prop_addr.split()) > 5:
-            parts = prop_addr.split("\n")
-            if len(parts) >= 2:
-                prop_addr = parts[0].strip()
-                prop_city = parts[1].strip()
+    @staticmethod
+    def _safe(data, *keys, default=""):
+        """Safely traverse nested dicts."""
+        cur = data
+        for k in keys:
+            if isinstance(cur, dict):
+                cur = cur.get(k)
+            else:
+                return default
+        return str(cur).strip() if cur else default
+
+    def _parse_pa_json(self, data: dict) -> dict:
+        """Extract address fields from the PA JSON API response.
+
+        The API nests data under 'PropertyInfo', with address fields like
+        SiteAddress, SiteCity, SiteZip, MailingAddress, MailingCity, etc.
+        There may also be top-level 'Mailing' and 'SiteAddress' keys.
+        We try multiple paths for resilience.
+        """
+        s = self._safe
+        pi = data.get("PropertyInfo", {}) or {}
+
+        # --- Property (site) address ---
+        prop_address = (
+            s(pi, "SiteAddress") or s(pi, "SitAddr") or s(pi, "Address")
+        )
+        prop_city = (
+            s(pi, "SiteCity") or s(pi, "Municipality")
+        )
+        prop_zip = (
+            s(pi, "SiteZip") or s(pi, "Zip")
+        )
+
+        # Fallback: top-level SiteAddress list
+        if not prop_address:
+            site_list = data.get("SiteAddress")
+            if isinstance(site_list, list) and site_list:
+                first = site_list[0] if isinstance(site_list[0], dict) else {}
+                prop_address = s(first, "Address")
+                prop_city = prop_city or s(first, "City")
+                prop_zip = prop_zip or s(first, "Zip")
+
+        # --- Mailing address ---
+        mail_address = (
+            s(pi, "MailingAddress") or s(pi, "MailAddr1")
+        )
+        mail_addr2 = s(pi, "MailAddr2")
+        if mail_addr2 and mail_address:
+            mail_address += f" {mail_addr2}"
+
+        mail_city = s(pi, "MailingCity") or s(pi, "MailCity")
+        mail_state = s(pi, "MailingState") or s(pi, "MailState")
+        mail_zip = s(pi, "MailingZip") or s(pi, "MailZip")
+
+        # Fallback: top-level Mailing object
+        mailing = data.get("Mailing", {}) or {}
+        if not mail_address:
+            a1 = s(mailing, "Addr1")
+            a2 = s(mailing, "Addr2")
+            mail_address = f"{a1} {a2}".strip() if a1 else ""
+        if not mail_city:
+            mail_city = s(mailing, "City")
+        if not mail_state:
+            mail_state = s(mailing, "State")
+        if not mail_zip:
+            mail_zip = s(mailing, "Zip")
+
+        # Default state to FL if we got a city
+        if mail_city and not mail_state:
+            mail_state = "FL"
 
         return {
-            "prop_address": prop_addr,
+            "prop_address": prop_address,
             "prop_city":    prop_city,
-            "prop_state":   "FL",
-            "prop_zip":     "",
-            "mail_address": mail_addr,
+            "prop_zip":     prop_zip,
+            "mail_address": mail_address,
             "mail_city":    mail_city,
-            "mail_state":   mail_state,
+            "mail_state":   mail_state or "FL",
             "mail_zip":     mail_zip,
         }
-
-    # Keep old API methods as fallback
-    def _parse_pa_response(self, data: dict) -> dict:
-        return {}
-
-    def _parse_arcgis_response(self, data: dict) -> dict:
-        return {}
 
 
 class ClerkAPIScraper:
@@ -598,6 +638,7 @@ class ClerkAPIScraper:
                         "grantee":      str(item.get("seconD_PARTY") or "").strip(),
                         "amount":       amount,
                         "legal":        str(item.get("legaL_DESCRIPTION") or "").strip(),
+                        "folio":        folio,
                         "prop_address": pa_data.get("prop_address") or prop_addr_raw,
                         "prop_city":    pa_data.get("prop_city", ""),
                         "prop_state":   "FL",
@@ -640,6 +681,7 @@ class ClerkAPIScraper:
                 log.error(f"Failed {doc_code}: {e}")
 
         log.info(f"Total: {len(all_records)}")
+        log.info(f"PA enrichment stats: {self.pa.stats}")
         return all_records
 
 
@@ -667,6 +709,8 @@ def build_output(records: list[dict]) -> dict:
         },
         "total":        len(enriched),
         "with_address": sum(1 for r in enriched if r.get("prop_address")),
+        "with_mail":    sum(1 for r in enriched if r.get("mail_address")),
+        "with_folio":   sum(1 for r in enriched if r.get("folio")),
         "records":      enriched,
     }
 
