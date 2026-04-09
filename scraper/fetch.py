@@ -41,30 +41,44 @@ log = logging.getLogger("miami_scraper")
 # ─────────────────────────────────────────────
 # DOCUMENT TYPE MAP
 # ─────────────────────────────────────────────
+# Maps our internal code -> (display_name, category, portal_search_value)
+# portal_search_value must match exactly what the dropdown shows
 DOC_TYPES = {
-    "LP":       ("Lis Pendens",             "pre-foreclosure"),
-    "NOFC":     ("Notice of Foreclosure",   "pre-foreclosure"),
-    "TAXDEED":  ("Tax Deed",                "tax-distressed"),
-    "JUD":      ("Judgment",                "judgment"),
-    "CCJ":      ("Certified Judgment",      "judgment"),
-    "DRJUD":    ("Domestic Judgment",       "judgment"),
-    "LNCORPTX": ("Corp Tax Lien",          "tax-lien"),
-    "LNIRS":    ("IRS Lien",               "tax-lien"),
-    "LNFED":    ("Federal Lien",           "tax-lien"),
-    "LN":       ("Lien",                   "lien"),
-    "LNMECH":   ("Mechanic Lien",          "lien"),
-    "LNHOA":    ("HOA Lien",              "lien"),
-    "MEDLN":    ("Medicaid Lien",          "lien"),
-    "PRO":      ("Probate Document",       "probate"),
-    "NOC":      ("Notice of Commencement", "notice"),
-    "RELLP":    ("Release of Lis Pendens", "release"),
+    "LIS":  ("Lis Pendens",              "pre-foreclosure"),
+    "JUD":  ("Judgement",                "judgment"),
+    "LIE":  ("Lien",                     "lien"),
+    "FTL":  ("Federal Tax Lien",         "tax-lien"),
+    "NCO":  ("Notice of Commencement",   "notice"),
+    "PAD":  ("Probate & Administration", "probate"),
+    "PRO":  ("Probate Order of Dist.",   "probate"),
+    "REL":  ("Release",                  "release"),
+    "NTL":  ("Notice of Tax Lien",       "tax-lien"),
+    "NCT":  ("Notice of Contest of Lien","lien"),
+    "SJU":  ("Satisfaction of Judgment", "judgment"),
+    "CLP":  ("Cancellation Lis Pendens", "release"),
+}
+
+# Full portal display names for search
+PORTAL_DOC_NAMES = {
+    "LIS":  "LIS PENDENS - LIS",
+    "JUD":  "JUDGEMENT - JUD",
+    "LIE":  "LIEN - LIE",
+    "FTL":  "FEDERAL TAX LIEN - FTL",
+    "NCO":  "NOTICE OF COMMENCEMENT - NCO",
+    "PAD":  "PROBATE & ADMINISTRATION - PAD",
+    "PRO":  "PROBATE ORDER OF DISTRIBUTION - PRO",
+    "REL":  "RELEASE - REL",
+    "NTL":  "NOTICE OF TAX LIEN - NTL",
+    "NCT":  "NOTICE OF CONTEST OF LIEN - NCT",
+    "SJU":  "SATISFACTION OF JUDGMENT - SJU",
+    "CLP":  "CANCELLATION OF LIS PENDENS - CLP",
 }
 
 CAT_LABELS = {
     "pre-foreclosure": "Pre-Foreclosure",
     "tax-distressed":  "Tax Distressed",
-    "judgment":        "Judgment / CCJ",
-    "tax-lien":        "Tax / IRS / Fed Lien",
+    "judgment":        "Judgment",
+    "tax-lien":        "Tax / Fed Lien",
     "lien":            "Lien",
     "probate":         "Probate / Estate",
     "notice":          "Notice",
@@ -258,13 +272,16 @@ class ClerkAPIScraper:
         import urllib.parse
 
         # Step 1: POST to standardsearch to get a qs token
+        # Use the full portal display name
+        portal_name = PORTAL_DOC_NAMES.get(doc_code, doc_code)
+
         search_url = (
             f"{API_BASE}/home/standardsearch"
             f"?partyName="
             f"&dateRangeFrom={urllib.parse.quote(self.date_from)}"
             f"&dateRangeTo={urllib.parse.quote(self.date_to)}"
-            f"&documentType={urllib.parse.quote(doc_code)}"
-            f"&searchT={urllib.parse.quote(doc_code)}"
+            f"&documentType={urllib.parse.quote(portal_name)}"
+            f"&searchT={urllib.parse.quote(portal_name)}"
             f"&firstQuery=y"
             f"&searchtype=Name/Document"
         )
