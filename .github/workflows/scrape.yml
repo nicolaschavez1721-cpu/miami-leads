@@ -1,0 +1,103 @@
+name: Scrape Miami-Dade Leads
+
+on:
+  schedule:
+    - cron: "0 7 * * *"   # 7:00 AM UTC daily (3:00 AM ET)
+  workflow_dispatch:        # manual trigger from GitHub UI
+
+permissions:
+  contents: write
+  pages: write
+  id-token: write
+
+jobs:
+  scrape:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 60
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Cache pip dependencies
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/pip
+          key: ${{ runner.os }}-pip-${{ hashFiles('scraper/requirements.txt') }}
+          restore-keys: |
+            ${{ runner.os }}-pip-
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install requests beautifulsoup4 lxml dbfread playwright
+
+      - name: Install Playwright browsers
+        run: python -m playwright install --with-deps chromium
+
+      - name: Create output directories
+        run: |
+          mkdir -p dashboard
+          mkdir -p data
+
+      - name: Run scraper
+        run: python scraper/fetch.py
+        env:
+          PYTHONUNBUFFERED: "1"
+
+      - name: Show result summary
+        run: |
+          echo "=== Scrape Results ==="
+          if [ -f data/records.json ]; then
+            python3 -c "
+          import json
+          with open('data/records.json') as f:
+              d = json.load(f)
+          print(f\"Total records: {d['total']}\")
+          print(f\"With address:  {d['with_address']}\")
+          print(f\"Fetched at:    {d['fetched_at']}\")
+          top = d['records'][:5]
+          for r in top:
+              print(f\"  [{r['score']}] {r['owner']} — {r['doc_type']} — {r['filed']}\")
+          "
+          else
+            echo "No records.json found"
+          fi
+
+      - name: Commit and push results
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add dashboard/records.json data/records.json data/ghl_export_*.csv || true
+          git diff --staged --quiet || git commit -m "🏠 Auto-scrape $(date +'%Y-%m-%d %H:%M UTC') — $(python3 -c \"import json; d=json.load(open('data/records.json')); print(d['total'])\" 2>/dev/null || echo '?') records"
+          git push
+
+  deploy-pages:
+    needs: scrape
+    runs-on: ubuntu-22.04
+    if: ${{ always() && needs.scrape.result != 'cancelled' }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          ref: main
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v4
+
+      - name: Upload dashboard to Pages
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: dashboard/
+
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
