@@ -130,21 +130,24 @@ def compute_score_and_flags(record: dict) -> tuple:
     return min(score, 100), list(dict.fromkeys(flags))
 
 # ─────────────────────────────────────────────
-# PROPERTY APPRAISER LOOKUP (JSON API)
+# PROPERTY APPRAISER LOOKUP (ArcGIS REST API)
 # ─────────────────────────────────────────────
 class PALookup:
     """Looks up property and mailing address from Miami-Dade PA by folio number.
 
-    Uses the PA propertysearch JSON API (the Angular SPA's backend):
-      https://www.miamidade.gov/Apps/PA/propertysearch/api/Property/{folio}
+    Uses the county's public ArcGIS feature service (PaGis layer):
+      https://gisweb.miamidade.gov/ArcGIS/rest/services/MD_NSPApp/MapServer/0/query
 
-    The old HTML scraper approach failed because both PA URLs serve an Angular
-    SPA — the HTML is just a JS bootstrap shell, so BeautifulSoup finds nothing.
-    This class calls the underlying JSON API directly.
+    Response fields:
+      FOLIO              - 13-digit folio
+      TRUE_SITE_ADDR     - property address (e.g. "2224 NE 136 ST")
+      TRUE_OWNER1        - owner name
+      MAILING_BLOCK_LINE3 - mailing street (e.g. "4681 GOLDEN BEACH CT")
+      MAILING_BLOCK_LINE4 - mailing city/state/zip (e.g. "KISSIMEE, FL 34746")
     """
 
-    PA_API_URL = "https://www.miamidade.gov/Apps/PA/propertysearch/api/Property/{folio}"
-    RATE_LIMIT_DELAY = 0.35  # seconds between requests
+    ARCGIS_URL = "https://gisweb.miamidade.gov/ArcGIS/rest/services/MD_NSPApp/MapServer/0/query"
+    RATE_LIMIT_DELAY = 0.25  # seconds between requests
 
     def __init__(self):
         self.session = requests.Session()
@@ -152,20 +155,13 @@ class PALookup:
             "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
                           "AppleWebKit/537.36 (KHTML, like Gecko) "
                           "Chrome/124.0.0.0 Safari/537.36",
-            "Accept": "application/json",
-            "Accept-Language": "en-US,en;q=0.9",
-            "Referer": "https://www.miamidade.gov/Apps/PA/propertysearch/",
         })
         self.cache = {}
         self.stats = {"hits": 0, "misses": 0, "errors": 0}
 
     @staticmethod
     def format_folio(folio: str) -> str:
-        """Strip non-digits and zero-pad to 13 digits.
-
-        Clerk records return 12-digit folios like '722210031920'.
-        PA API expects 13 digits: '0722210031920'.
-        """
+        """Strip non-digits and zero-pad to 13 digits."""
         digits = re.sub(r"[^0-9]", "", str(folio))
         return digits.zfill(13)
 
@@ -182,7 +178,7 @@ class PALookup:
         if folio_clean in self.cache:
             return self.cache[folio_clean]
 
-        result = self._call_pa_api(folio_clean)
+        result = self._query_arcgis(folio_clean)
         self.cache[folio_clean] = result
 
         if result.get("prop_address"):
@@ -190,141 +186,85 @@ class PALookup:
             log.info(f"PA hit {folio_clean}: {result['prop_address']}, {result.get('prop_city','')}")
         else:
             self.stats["misses"] += 1
-            log.info(f"PA miss for folio: {folio_clean}")
+            log.debug(f"PA miss for folio: {folio_clean}")
 
         time.sleep(self.RATE_LIMIT_DELAY)
         return result
 
-    def _call_pa_api(self, folio: str) -> dict:
-        """Call the PA JSON API and parse the response."""
-        url = self.PA_API_URL.format(folio=folio)
-
-        if not hasattr(self, '_diag_count'):
-            self._diag_count = 0
-        self._diag_count += 1
-        diag = self._diag_count <= 3
+    def _query_arcgis(self, folio: str) -> dict:
+        """Query the ArcGIS PaGis layer by folio number."""
+        params = {
+            "where": f"FOLIO='{folio}'",
+            "outFields": "FOLIO,TRUE_SITE_ADDR,TRUE_OWNER1,MAILING_BLOCK_LINE3,MAILING_BLOCK_LINE4",
+            "returnGeometry": "false",
+            "f": "json",
+        }
 
         try:
-            if diag:
-                log.info(f"PA_DIAG #{self._diag_count} GET {url}")
+            r = self.session.get(self.ARCGIS_URL, params=params, timeout=15)
 
-            r = self.session.get(url, timeout=15)
-
-            if diag:
-                log.info(f"PA_DIAG #{self._diag_count} status={r.status_code} ct={r.headers.get('Content-Type','')} len={len(r.text)}")
-                log.info(f"PA_DIAG #{self._diag_count} BODY: {r.text[:2000]}")
-
-            if r.status_code == 404:
-                return {}
             if r.status_code != 200:
+                log.warning(f"ArcGIS {r.status_code} for folio {folio}")
                 self.stats["errors"] += 1
                 return {}
 
-            try:
-                data = r.json()
-            except Exception as je:
-                if diag:
-                    log.info(f"PA_DIAG #{self._diag_count} json parse failed: {je}")
+            data = r.json()
+
+            # ArcGIS returns {"features": [{"attributes": {...}}]}
+            features = data.get("features", [])
+            if not features:
                 return {}
 
-            if diag:
-                log.info(f"PA_DIAG #{self._diag_count} type={type(data).__name__}")
-                if isinstance(data, dict):
-                    log.info(f"PA_DIAG #{self._diag_count} keys={list(data.keys())}")
-                    for k, v in data.items():
-                        log.info(f"PA_DIAG #{self._diag_count} '{k}'={str(v)[:500]}")
-
-            if not data or isinstance(data, str):
-                return {}
-
-            result = self._parse_pa_json(data)
-
-            if diag:
-                log.info(f"PA_DIAG #{self._diag_count} parsed={result}")
-
-            return result
+            attrs = features[0].get("attributes", {})
+            return self._parse_attributes(attrs)
 
         except requests.exceptions.RequestException as e:
-            if diag:
-                log.info(f"PA_DIAG #{self._diag_count} REQUEST ERROR: {e}")
+            log.warning(f"ArcGIS error for {folio}: {e}")
             self.stats["errors"] += 1
             return {}
-        except Exception as e:
-            if diag:
-                log.info(f"PA_DIAG #{self._diag_count} UNEXPECTED ERROR: {e}")
+        except (ValueError, KeyError) as e:
+            log.warning(f"ArcGIS parse error for {folio}: {e}")
             self.stats["errors"] += 1
             return {}
 
     @staticmethod
-    def _safe(data, *keys, default=""):
-        """Safely traverse nested dicts."""
-        cur = data
-        for k in keys:
-            if isinstance(cur, dict):
-                cur = cur.get(k)
-            else:
-                return default
-        return str(cur).strip() if cur else default
+    def _parse_attributes(attrs: dict) -> dict:
+        """Parse ArcGIS PaGis attributes into our standard address fields.
 
-    def _parse_pa_json(self, data: dict) -> dict:
-        """Extract address fields from the PA JSON API response.
-
-        The API nests data under 'PropertyInfo', with address fields like
-        SiteAddress, SiteCity, SiteZip, MailingAddress, MailingCity, etc.
-        There may also be top-level 'Mailing' and 'SiteAddress' keys.
-        We try multiple paths for resilience.
+        TRUE_SITE_ADDR      = "2224 NE 136 ST"
+        MAILING_BLOCK_LINE3 = "4681 GOLDEN BEACH CT"
+        MAILING_BLOCK_LINE4 = "KISSIMEE, FL 34746"
         """
-        s = self._safe
-        pi = data.get("PropertyInfo", {}) or {}
+        prop_address = (attrs.get("TRUE_SITE_ADDR") or "").strip()
 
-        # --- Property (site) address ---
-        prop_address = (
-            s(pi, "SiteAddress") or s(pi, "SitAddr") or s(pi, "Address")
-        )
-        prop_city = (
-            s(pi, "SiteCity") or s(pi, "Municipality")
-        )
-        prop_zip = (
-            s(pi, "SiteZip") or s(pi, "Zip")
-        )
+        mail_address = (attrs.get("MAILING_BLOCK_LINE3") or "").strip()
 
-        # Fallback: top-level SiteAddress list
-        if not prop_address:
-            site_list = data.get("SiteAddress")
-            if isinstance(site_list, list) and site_list:
-                first = site_list[0] if isinstance(site_list[0], dict) else {}
-                prop_address = s(first, "Address")
-                prop_city = prop_city or s(first, "City")
-                prop_zip = prop_zip or s(first, "Zip")
+        # Parse city/state/zip from MAILING_BLOCK_LINE4
+        # Format: "CITY, ST ZIPCODE" e.g. "KISSIMEE, FL 34746"
+        mail_city, mail_state, mail_zip = "", "FL", ""
+        line4 = (attrs.get("MAILING_BLOCK_LINE4") or "").strip()
+        if line4:
+            m = re.match(r"^(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)", line4)
+            if m:
+                mail_city = m.group(1).strip()
+                mail_state = m.group(2)
+                mail_zip = m.group(3)
+            else:
+                # Try without comma: "MIAMI FL 33128"
+                m2 = re.match(r"^(.+?)\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)", line4)
+                if m2:
+                    mail_city = m2.group(1).strip()
+                    mail_state = m2.group(2)
+                    mail_zip = m2.group(3)
+                else:
+                    # Fallback: just use the whole line
+                    mail_city = line4
 
-        # --- Mailing address ---
-        mail_address = (
-            s(pi, "MailingAddress") or s(pi, "MailAddr1")
-        )
-        mail_addr2 = s(pi, "MailAddr2")
-        if mail_addr2 and mail_address:
-            mail_address += f" {mail_addr2}"
-
-        mail_city = s(pi, "MailingCity") or s(pi, "MailCity")
-        mail_state = s(pi, "MailingState") or s(pi, "MailState")
-        mail_zip = s(pi, "MailingZip") or s(pi, "MailZip")
-
-        # Fallback: top-level Mailing object
-        mailing = data.get("Mailing", {}) or {}
-        if not mail_address:
-            a1 = s(mailing, "Addr1")
-            a2 = s(mailing, "Addr2")
-            mail_address = f"{a1} {a2}".strip() if a1 else ""
-        if not mail_city:
-            mail_city = s(mailing, "City")
-        if not mail_state:
-            mail_state = s(mailing, "State")
-        if not mail_zip:
-            mail_zip = s(mailing, "Zip")
-
-        # Default state to FL if we got a city
-        if mail_city and not mail_state:
-            mail_state = "FL"
+        # Try to extract city from site address (not always possible)
+        # The ArcGIS layer only gives street, not city/zip for site address
+        # We'll leave prop_city empty — the dashboard can show just the street
+        prop_city = ""
+        prop_zip = ""
 
         return {
             "prop_address": prop_address,
@@ -332,7 +272,7 @@ class PALookup:
             "prop_zip":     prop_zip,
             "mail_address": mail_address,
             "mail_city":    mail_city,
-            "mail_state":   mail_state or "FL",
+            "mail_state":   mail_state,
             "mail_zip":     mail_zip,
         }
 
