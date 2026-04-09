@@ -40,6 +40,50 @@ log = logging.getLogger("miami_scraper")
 
 
 # ─────────────────────────────────────────────
+# DOCUMENT TYPE MAP
+# ─────────────────────────────────────────────
+DOC_TYPES = {
+    "LIS":  ("Lis Pendens",              "pre-foreclosure"),
+    "JUD":  ("Judgement",                "judgment"),
+    "LIE":  ("Lien",                     "lien"),
+    "FTL":  ("Federal Tax Lien",         "tax-lien"),
+    "NCO":  ("Notice of Commencement",   "notice"),
+    "PAD":  ("Probate & Administration", "probate"),
+    "PRO":  ("Probate Order of Dist.",   "probate"),
+    "REL":  ("Release",                  "release"),
+    "NTL":  ("Notice of Tax Lien",       "tax-lien"),
+    "NCT":  ("Notice of Contest of Lien","lien"),
+    "SJU":  ("Satisfaction of Judgment", "judgment"),
+    "CLP":  ("Cancellation Lis Pendens", "release"),
+}
+
+PORTAL_DOC_NAMES = {
+    "LIS":  "LIS PENDENS - LIS",
+    "JUD":  "JUDGEMENT - JUD",
+    "LIE":  "LIEN - LIE",
+    "FTL":  "FEDERAL TAX LIEN - FTL",
+    "NCO":  "NOTICE OF COMMENCEMENT - NCO",
+    "PAD":  "PROBATE & ADMINISTRATION - PAD",
+    "PRO":  "PROBATE ORDER OF DISTRIBUTION - PRO",
+    "REL":  "RELEASE - REL",
+    "NTL":  "NOTICE OF TAX LIEN - NTL",
+    "NCT":  "NOTICE OF CONTEST OF LIEN - NCT",
+    "SJU":  "SATISFACTION OF JUDGMENT - SJU",
+    "CLP":  "CANCELLATION OF LIS PENDENS - CLP",
+}
+
+CAT_LABELS = {
+    "pre-foreclosure": "Pre-Foreclosure",
+    "tax-distressed":  "Tax Distressed",
+    "judgment":        "Judgment",
+    "tax-lien":        "Tax / Fed Lien",
+    "lien":            "Lien",
+    "probate":         "Probate / Estate",
+    "notice":          "Notice",
+    "release":         "Release",
+}
+
+# ─────────────────────────────────────────────
 # PROPERTY APPRAISER LOOKUP
 # ─────────────────────────────────────────────
 class PALookup:
