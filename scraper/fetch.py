@@ -275,7 +275,7 @@ class ParcelLookup:
                 return
 
         # CSV fallback (opendata)
-        if raw[:3] in (b"ï»¿", b"\xef\xbb\xbf") or raw[0:1] == b'"' or raw[0:1].isalpha():
+        if raw[:3] == b"\xef\xbb\xbf" or raw[0:1] == b'"' or raw[0:1].isalpha():
             self._load_csv(raw)
             self._loaded = True
             return
