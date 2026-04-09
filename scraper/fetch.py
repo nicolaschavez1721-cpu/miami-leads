@@ -156,9 +156,12 @@ class ClerkScraper:
                 await asyncio.sleep(2)
 
                 # Inject the PremierID session cookie
-                await page.context.add_cookies([
+                # Get NSC load balancer cookie from env if available
+                nsc_cookie = os.environ.get("CLERK_NSC", "")
+
+                cookies = [
                     {
-                        "name": ".PremierID",
+                        "name": ".PremierIDDade",
                         "value": clerk_session,
                         "domain": "onlineservices.miamidadeclerk.gov",
                         "path": "/",
@@ -166,14 +169,24 @@ class ClerkScraper:
                         "httpOnly": True,
                     },
                     {
-                        "name": ".PremierID",
+                        "name": ".PremierIDDade",
                         "value": clerk_session,
                         "domain": "www2.miamidadeclerk.gov",
                         "path": "/",
                         "secure": True,
                         "httpOnly": True,
-                    }
-                ])
+                    },
+                ]
+                if nsc_cookie:
+                    cookies.append({
+                        "name": "NSC_JOeqtbnye4rqvqae52yysbdjdcwntcw",
+                        "value": nsc_cookie,
+                        "domain": "onlineservices.miamidadeclerk.gov",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    })
+                await page.context.add_cookies(cookies)
                 log.info("Session cookie injected")
 
                 # Reload to apply cookie
