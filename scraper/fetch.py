@@ -145,7 +145,52 @@ class ClerkScraper:
             log.debug(f"Screenshot error: {e}")
 
     async def _login(self, page) -> bool:
-        """Log in to bypass reCAPTCHA."""
+        """Inject session cookie to bypass login and reCAPTCHA."""
+        clerk_session = os.environ.get("CLERK_SESSION", "")
+
+        if clerk_session:
+            log.info("Injecting session cookie...")
+            try:
+                # First visit the portal to establish context
+                await page.goto(PORTAL_HOME, wait_until="domcontentloaded", timeout=30000)
+                await asyncio.sleep(2)
+
+                # Inject the PremierID session cookie
+                await page.context.add_cookies([
+                    {
+                        "name": ".PremierID",
+                        "value": clerk_session,
+                        "domain": "onlineservices.miamidadeclerk.gov",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    },
+                    {
+                        "name": ".PremierID",
+                        "value": clerk_session,
+                        "domain": "www2.miamidadeclerk.gov",
+                        "path": "/",
+                        "secure": True,
+                        "httpOnly": True,
+                    }
+                ])
+                log.info("Session cookie injected")
+
+                # Reload to apply cookie
+                await page.goto(PORTAL_HOME, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(2)
+                await self._screenshot(page, "after_cookie_inject")
+
+                content = await page.content()
+                text = await page.evaluate("() => document.body ? document.body.innerText.slice(0,300) : ''")
+                log.info(f"Portal after cookie: {text[:200].replace(chr(10),' ')}")
+
+                self.logged_in = True
+                return True
+            except Exception as e:
+                log.error(f"Cookie injection error: {e}")
+
+        # Fall back to form login
         if not CLERK_EMAIL or not CLERK_PASSWORD:
             log.warning("No credentials provided — will attempt without login")
             return False
