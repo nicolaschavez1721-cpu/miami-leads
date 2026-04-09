@@ -251,72 +251,87 @@ class ClerkAPIScraper:
                 log.debug(f"Probe {ep}: {e}")
 
     def _search_by_doctype(self, doc_code: str) -> list[dict]:
-        """Search for records by document type and date range."""
+        """Search using the exact API flow discovered from browser Network tab."""
         doc_label, cat = DOC_TYPES.get(doc_code, (doc_code, "other"))
         records = []
 
-        # Common search payload formats
-        payloads = [
-            {
-                "documentType": doc_code,
-                "startDate": self.date_from,
-                "endDate": self.date_to,
-                "pageNumber": 1,
-                "pageSize": 200,
-            },
-            {
-                "docType": doc_code,
-                "dateFrom": self.date_from,
-                "dateTo": self.date_to,
-            },
-            {
-                "DocType": doc_code,
-                "RecordedDateFrom": self.date_from,
-                "RecordedDateTo": self.date_to,
-            },
-        ]
+        import urllib.parse
 
-        # Search endpoints to try
-        endpoints = [
-            f"{API_BASE}/Search/StandardSearch",
-            f"{API_BASE}/Search/NameDocumentSearch",
-            f"{API_BASE}/OfficialRecords/Search",
-            f"{API_BASE}/Search",
-            f"{API_BASE}/Document/Search",
-            f"{API_BASE}/Records/Search",
-            # Try with query params instead
-        ]
+        # Step 1: POST to standardsearch to get a qs token
+        search_url = (
+            f"{API_BASE}/home/standardsearch"
+            f"?partyName="
+            f"&dateRangeFrom={urllib.parse.quote(self.date_from)}"
+            f"&dateRangeTo={urllib.parse.quote(self.date_to)}"
+            f"&documentType={urllib.parse.quote(doc_code)}"
+            f"&searchT={urllib.parse.quote(doc_code)}"
+            f"&firstQuery=y"
+            f"&searchtype=Name/Document"
+        )
 
-        # Also try GET with query params
-        get_urls = [
-            f"{API_BASE}/Search/StandardSearch?documentType={doc_code}&startDate={self.date_from}&endDate={self.date_to}",
-            f"{API_BASE}/Search?docType={doc_code}&dateFrom={self.date_from}&dateTo={self.date_to}",
-        ]
+        log.info(f"POST standardsearch for {doc_code}...")
+        try:
+            r = self.session.post(
+                search_url,
+                headers={"Content-Length": "0", "Content-Type": "application/json; charset=utf-8"},
+                timeout=30
+            )
+            log.info(f"standardsearch {doc_code}: {r.status_code} - {r.text[:300]}")
 
-        for url in get_urls:
+            if r.status_code != 200:
+                log.warning(f"standardsearch failed: {r.status_code}")
+                return records
+
+            # Parse the qs token from response
             try:
-                r = self.session.get(url, timeout=20)
-                log.info(f"GET {url.split('?')[0]}: {r.status_code} - {r.text[:200]}")
-                if r.status_code == 200 and len(r.text) > 50:
-                    data = self._parse_api_response(r, doc_code, cat, doc_label)
-                    if data:
-                        records.extend(data)
-                        return records
-            except Exception as e:
-                log.debug(f"GET error: {e}")
+                data = r.json()
+                log.info(f"standardsearch response keys: {list(data.keys()) if isinstance(data, dict) else type(data)}")
+                qs = None
+                if isinstance(data, dict):
+                    qs = data.get("qs") or data.get("queryString") or data.get("token") or data.get("key")
+                    # Sometimes it's nested
+                    if not qs:
+                        for v in data.values():
+                            if isinstance(v, str) and len(v) > 20:
+                                qs = v
+                                break
+                elif isinstance(data, str) and len(data) > 10:
+                    qs = data
 
-        for endpoint in endpoints:
-            for payload in payloads:
-                try:
-                    r = self.session.post(endpoint, json=payload, timeout=20)
-                    log.info(f"POST {endpoint}: {r.status_code} - {r.text[:200]}")
-                    if r.status_code == 200 and len(r.text) > 50:
-                        data = self._parse_api_response(r, doc_code, cat, doc_label)
-                        if data:
-                            records.extend(data)
-                            return records
-                except Exception as e:
-                    log.debug(f"POST error: {e}")
+                log.info(f"qs token: {str(qs)[:100] if qs else 'NOT FOUND'}")
+
+                if not qs:
+                    log.warning(f"No qs token in response for {doc_code}")
+                    return records
+
+            except Exception as e:
+                log.warning(f"Could not parse standardsearch response: {e} - {r.text[:200]}")
+                return records
+
+        except Exception as e:
+            log.error(f"standardsearch request error: {e}")
+            return records
+
+        # Step 2: GET getStandardRecords with the qs token
+        import time
+        time.sleep(0.5)
+
+        records_url = f"{API_BASE}/SearchResults/getStandardRecords?qs={urllib.parse.quote(str(qs))}"
+        log.info(f"GET getStandardRecords for {doc_code}...")
+
+        try:
+            r2 = self.session.get(records_url, timeout=30)
+            log.info(f"getStandardRecords {doc_code}: {r2.status_code} - {r2.text[:300]}")
+
+            if r2.status_code == 200:
+                parsed = self._parse_api_response(r2, doc_code, cat, doc_label)
+                records.extend(parsed)
+                log.info(f"Parsed {len(parsed)} records for {doc_code}")
+            else:
+                log.warning(f"getStandardRecords failed: {r2.status_code}")
+
+        except Exception as e:
+            log.error(f"getStandardRecords error: {e}")
 
         return records
 
