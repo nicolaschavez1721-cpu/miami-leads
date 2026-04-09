@@ -191,7 +191,48 @@ class PALookup:
         time.sleep(self.RATE_LIMIT_DELAY)
         return result
 
-    def _query_arcgis(self, folio: str) -> dict:
+    def lookup_by_address(self, address: str) -> dict:
+        """Reverse-lookup: find property by street address via ArcGIS.
+
+        Used when the clerk record has an address but no folio number.
+        Returns mailing address info if found.
+        """
+        import time
+
+        if not address or len(address) < 5:
+            return {}
+
+        # Cache on address too
+        cache_key = f"addr:{address.upper()}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        params = {
+            "where": f"TRUE_SITE_ADDR LIKE '{address.upper().replace(chr(39), '')}%'",
+            "outFields": "FOLIO,TRUE_SITE_ADDR,TRUE_OWNER1,MAILING_BLOCK_LINE3,MAILING_BLOCK_LINE4",
+            "returnGeometry": "false",
+            "resultRecordCount": 1,
+            "f": "json",
+        }
+
+        result = {}
+        try:
+            r = self.session.get(self.ARCGIS_URL, params=params, timeout=15)
+            if r.status_code == 200:
+                data = r.json()
+                features = data.get("features", [])
+                if features:
+                    attrs = features[0].get("attributes", {})
+                    result = self._parse_attributes(attrs)
+                    if result.get("mail_address"):
+                        self.stats["hits"] += 1
+                        log.info(f"PA addr-hit '{address}': mail={result['mail_address']}")
+        except Exception as e:
+            log.debug(f"ArcGIS addr lookup error: {e}")
+
+        self.cache[cache_key] = result
+        time.sleep(self.RATE_LIMIT_DELAY)
+        return result
         """Query the ArcGIS PaGis layer by folio number."""
         params = {
             "where": f"FOLIO='{folio}'",
@@ -584,19 +625,32 @@ class ClerkAPIScraper:
 
                     # Start with address from clerk record
                     prop_addr_raw = str(item.get("address") or item.get("addressnounit") or "").strip()
-                    folio_raw = item.get("foliO_NUMBER") or item.get("folioNumber") or item.get("folio") or ""
+
+                    # Extract folio - careful: foliO_NUMBER=0 (int) is falsy but valid
+                    # Must check explicitly for None rather than using `or` chain
+                    folio_val = item.get("foliO_NUMBER")
+                    if folio_val is None:
+                        folio_val = item.get("folioNumber")
+                    if folio_val is None:
+                        folio_val = item.get("folio")
+                    folio = str(folio_val).strip() if folio_val is not None else ""
+
                     # Log first 3 records to see folio values
                     if len(records) < 3:
-                        log.info(f"FOLIO DEBUG: folio_raw={folio_raw!r} addr={prop_addr_raw!r}")
+                        log.info(f"FOLIO DEBUG: folio_raw={folio!r} addr={prop_addr_raw!r}")
                         log.info(f"FOLIO DEBUG full item folio key: foliO_NUMBER={item.get('foliO_NUMBER')!r}")
 
                     # Enrich with PA data using folio number
-                    folio = str(folio_raw).strip()
-                    if folio and folio not in ("", "None"):
-                        log.info(f"PA lookup for folio: {folio}")
+                    pa_data = {}
+                    if folio and folio not in ("", "0", "None", "null"):
                         pa_data = self.pa.lookup(folio)
-                    else:
-                        pa_data = {}
+
+                    # Fallback: if no folio hit but we have a clerk address,
+                    # try reverse-lookup by address on ArcGIS
+                    if not pa_data.get("mail_address") and prop_addr_raw:
+                        addr_data = self.pa.lookup_by_address(prop_addr_raw)
+                        if addr_data:
+                            pa_data = addr_data
 
                     records.append({
                         "doc_num":      doc_num,
@@ -750,3 +804,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
