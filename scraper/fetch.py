@@ -348,7 +348,7 @@ class ClerkAPIScraper:
             log.info(f"getStandardRecords {doc_code}: {r2.status_code} - {r2.text[:300]}")
 
             if r2.status_code == 200:
-                parsed = self._parse_api_response(r2, doc_code, cat, doc_label)
+                parsed = self._parse_api_response(r2, doc_code, cat, doc_label, self.lookback_days)
                 records.extend(parsed)
                 log.info(f"Parsed {len(parsed)} records for {doc_code}")
             else:
@@ -359,7 +359,7 @@ class ClerkAPIScraper:
 
         return records
 
-    def _parse_api_response(self, response, doc_code, cat, doc_label) -> list[dict]:
+    def _parse_api_response(self, response, doc_code, cat, doc_label, lookback_days=7) -> list[dict]:
         """Parse API JSON response into records."""
         records = []
         try:
@@ -407,11 +407,13 @@ class ClerkAPIScraper:
                     if filed:
                         try:
                             rec_dt = datetime.strptime(filed, "%Y-%m-%d")
-                            cutoff = datetime.now() - timedelta(days=self.lookback_days)
-                            if rec_dt < cutoff:
+                            cutoff_dt = datetime.now() - timedelta(days=lookback_days)
+                            if rec_dt < cutoff_dt:
                                 continue  # skip old records
                         except Exception:
                             pass
+                    else:
+                        continue  # skip records with no date
 
                     amount = None
                     raw_amt = item.get("consideratioN_1") or item.get("consideratioN_2")
