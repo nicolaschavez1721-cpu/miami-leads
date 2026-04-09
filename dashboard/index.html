@@ -424,7 +424,7 @@ async function loadData() {
 
     allRecords = d.records || [];
     document.getElementById('fetchTime').innerHTML =
-      '<span class="pulse"></span>' + new Date(d.fetched_at).toLocaleString();
+      '<span class="pulse"></span>' + new Date(d.fetched_at).toLocaleString('en-US', {timeZone:'America/New_York'}) + ' ET';
 
     // Stats
     const fc    = allRecords.filter(r => r.cat === 'pre-foreclosure').length;
