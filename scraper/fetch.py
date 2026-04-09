@@ -190,7 +190,7 @@ class PALookup:
             log.info(f"PA hit {folio_clean}: {result['prop_address']}, {result.get('prop_city','')}")
         else:
             self.stats["misses"] += 1
-            log.debug(f"PA miss for folio: {folio_clean}")
+            log.info(f"PA miss for folio: {folio_clean}")
 
         time.sleep(self.RATE_LIMIT_DELAY)
         return result
@@ -212,7 +212,23 @@ class PALookup:
 
             data = r.json()
             if not data or isinstance(data, str):
+                log.info(f"PA empty/string response for {folio}: {str(data)[:200]}")
                 return {}
+
+            # DIAGNOSTIC: dump raw JSON structure for the first folio
+            # so we can see the actual field names the API returns
+            if not hasattr(self, '_dumped_raw'):
+                self._dumped_raw = True
+                import json as _json
+                raw_str = _json.dumps(data, indent=2, default=str)
+                # Log in chunks so GitHub Actions doesn't truncate
+                log.info(f"PA RAW RESPONSE for folio {folio} (type={type(data).__name__}):")
+                if isinstance(data, dict):
+                    log.info(f"PA TOP-LEVEL KEYS: {list(data.keys())}")
+                    for k, v in data.items():
+                        v_str = str(v)[:300]
+                        log.info(f"PA KEY '{k}': {v_str}")
+                log.info(f"PA FULL JSON (first 2000 chars): {raw_str[:2000]}")
 
             return self._parse_pa_json(data)
 
