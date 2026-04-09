@@ -169,38 +169,103 @@ class ClerkScraper:
 
             await self._screenshot(page, "login_page")
 
-            # Fill email
-            for sel in ["#EmailAddress", "#Email", "#email", "input[type='email']", "input[name*='email' i]"]:
+            # The login page has two sections:
+            # Left: "Registered User" with User ID/Email + Password + LOGIN button
+            # Right: "New Users" registration
+            # We need to fill the LEFT side fields
+
+            # Find all inputs on the page
+            all_inputs = await page.evaluate("""() => {
+                return Array.from(document.querySelectorAll('input')).map((el, i) => ({
+                    index: i,
+                    id: el.id, name: el.name, type: el.type,
+                    placeholder: el.placeholder,
+                    visible: el.offsetParent !== null
+                }));
+            }""")
+            log.info(f"Login page inputs: {all_inputs}")
+
+            # Fill by index - first text input is email, first password is password
+            # Use nth-of-type or position-based filling
+            text_inputs = [i for i in all_inputs if i['type'] in ('text', 'email', '') and i['visible']]
+            pass_inputs = [i for i in all_inputs if i['type'] == 'password' and i['visible']]
+
+            log.info(f"Text inputs: {text_inputs}")
+            log.info(f"Pass inputs: {pass_inputs}")
+
+            # Fill email - try by label proximity, then by position
+            filled_email = False
+            for strategy in [
+                "input[type='text']:first-of-type",
+                "input:not([type='password']):not([type='submit']):not([type='hidden'])",
+                "//label[contains(text(),'User') or contains(text(),'Email')]/following-sibling::input",
+                "//div[contains(@class,'register') or contains(text(),'Registered')]//input[@type='text']",
+            ]:
                 try:
-                    el = await page.query_selector(sel)
-                    if el:
+                    if strategy.startswith("//"):
+                        el = await page.query_selector(f"xpath={strategy}")
+                    else:
+                        # Get first matching element in left column
+                        els = await page.query_selector_all(strategy)
+                        el = els[0] if els else None
+                    if el and await el.is_visible():
                         await el.fill(CLERK_EMAIL)
-                        log.info(f"Filled email: {sel}")
+                        log.info(f"Filled email via: {strategy}")
+                        filled_email = True
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug(f"Email fill try {strategy}: {e}")
+
+            if not filled_email:
+                # Last resort: click on first visible text input and type
+                try:
+                    await page.click("input[type='text']")
+                    await page.keyboard.type(CLERK_EMAIL)
+                    log.info("Filled email by keyboard")
+                    filled_email = True
+                except Exception as e:
+                    log.warning(f"Could not fill email: {e}")
 
             # Fill password
-            for sel in ["#Password", "#password", "input[type='password']"]:
+            filled_pass = False
+            for strategy in ["input[type='password']"]:
                 try:
-                    el = await page.query_selector(sel)
-                    if el:
+                    els = await page.query_selector_all(strategy)
+                    el = els[0] if els else None
+                    if el and await el.is_visible():
                         await el.fill(CLERK_PASSWORD)
-                        log.info(f"Filled password: {sel}")
+                        log.info(f"Filled password via: {strategy}")
+                        filled_pass = True
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug(f"Password fill try: {e}")
 
-            # Submit
-            for sel in ["input[type='submit']", "button[type='submit']", "text=Login", "text=Sign In"]:
+            log.info(f"Fill status: email={filled_email}, password={filled_pass}")
+
+            # Click LOGIN button (not REGISTER)
+            submitted = False
+            for strategy in [
+                "//button[normalize-space(text())='LOGIN']",
+                "//input[@value='LOGIN' or @value='Login']",
+                "button:has-text('LOGIN')",
+                "input[value='LOGIN']",
+            ]:
                 try:
-                    el = await page.query_selector(sel)
-                    if el:
+                    if strategy.startswith("//"):
+                        el = await page.query_selector(f"xpath={strategy}")
+                    else:
+                        el = await page.query_selector(strategy)
+                    if el and await el.is_visible():
                         await el.click()
-                        log.info(f"Submitted login via: {sel}")
+                        log.info(f"Clicked LOGIN via: {strategy}")
+                        submitted = True
                         break
-                except Exception:
-                    pass
+                except Exception as e:
+                    log.debug(f"Submit try {strategy}: {e}")
+
+            if not submitted:
+                await page.keyboard.press("Enter")
+                log.info("Submitted via Enter key")
 
             await page.wait_for_load_state("networkidle", timeout=20000)
             await asyncio.sleep(2)
