@@ -38,6 +38,115 @@ logging.basicConfig(
 )
 log = logging.getLogger("miami_scraper")
 
+
+# ─────────────────────────────────────────────
+# PROPERTY APPRAISER LOOKUP
+# ─────────────────────────────────────────────
+class PALookup:
+    """Looks up property and mailing address from Miami-Dade PA by folio number."""
+
+    # Internal API used by the PA property search React app
+    API_ENDPOINTS = [
+        "https://www.miamidade.gov/Apps/PA/propertysearch/api/Property/{folio}",
+        "https://www.miamidadepa.gov/Apps/PA/propertysearch/api/Property/{folio}",
+        "https://gisweb.miamidade.gov/arcgis/rest/services/MDC/Property/MapServer/0/query?where=FOLIO_NUM+%3D+%27{folio}%27&outFields=*&f=json",
+    ]
+
+    def __init__(self):
+        self.session = requests.Session()
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Referer": "https://www.miamidade.gov/Apps/PA/propertysearch/",
+        })
+        self.cache = {}
+
+    def lookup(self, folio: str) -> dict:
+        if not folio or str(folio).strip() in ("", "None", "null"):
+            return {}
+
+        folio = str(folio).strip().replace("-", "").replace(" ", "")
+        if folio in self.cache:
+            return self.cache[folio]
+
+        result = {}
+
+        # Try primary PA API
+        for endpoint_tmpl in self.API_ENDPOINTS:
+            url = endpoint_tmpl.format(folio=folio)
+            try:
+                r = self.session.get(url, timeout=10)
+                if r.status_code == 200 and r.text.strip().startswith("{"):
+                    data = r.json()
+                    result = self._parse_pa_response(data)
+                    if result.get("prop_address"):
+                        log.debug(f"PA hit for {folio}: {result['prop_address']}")
+                        break
+                elif r.status_code == 200 and "features" in r.text:
+                    data = r.json()
+                    result = self._parse_arcgis_response(data)
+                    if result.get("prop_address"):
+                        break
+            except Exception as e:
+                log.debug(f"PA lookup error {url}: {e}")
+
+        self.cache[folio] = result
+        return result
+
+    def _parse_pa_response(self, data: dict) -> dict:
+        """Parse the PA property search API response."""
+        # Try nested structures
+        prop = data
+        for key in ["Property", "property", "Summary", "summary", "data", "result"]:
+            if key in data and isinstance(data[key], dict):
+                prop = data[key]
+                break
+
+        def g(*keys):
+            for k in keys:
+                v = prop.get(k) or data.get(k)
+                if v and str(v).strip() not in ("", "None", "null", "0"):
+                    return str(v).strip()
+            return ""
+
+        site_addr = g("SiteAddress", "siteAddress", "SITE_ADDR", "PropertyAddress",
+                      "propertyAddress", "address", "Address", "SITEADDRESS")
+        site_city = g("SiteCity", "siteCity", "SITE_CITY", "City", "city")
+        site_zip  = g("SiteZip", "siteZip", "SITE_ZIP", "Zip", "zip", "ZipCode")
+        mail_addr = g("MailingAddress", "mailingAddress", "MAIL_ADDR", "MailAddr",
+                      "mail_address", "MailAddress")
+        mail_city = g("MailingCity", "mailingCity", "MAIL_CITY", "MailCity")
+        mail_state= g("MailingState", "mailingState", "MAIL_STATE", "MailState") or "FL"
+        mail_zip  = g("MailingZip", "mailingZip", "MAIL_ZIP", "MailZip")
+
+        return {
+            "prop_address": site_addr,
+            "prop_city":    site_city,
+            "prop_state":   "FL",
+            "prop_zip":     site_zip,
+            "mail_address": mail_addr,
+            "mail_city":    mail_city,
+            "mail_state":   mail_state,
+            "mail_zip":     mail_zip,
+        }
+
+    def _parse_arcgis_response(self, data: dict) -> dict:
+        """Parse ArcGIS REST API response."""
+        features = data.get("features", [])
+        if not features:
+            return {}
+        attrs = features[0].get("attributes", {})
+        return {
+            "prop_address": str(attrs.get("SITEADDRESS") or attrs.get("SITE_ADDR") or "").strip(),
+            "prop_city":    str(attrs.get("SITE_CITY") or attrs.get("SITECITY") or "").strip(),
+            "prop_state":   "FL",
+            "prop_zip":     str(attrs.get("SITE_ZIP") or attrs.get("SITEZIP") or "").strip(),
+            "mail_address": str(attrs.get("MAILADR1") or attrs.get("MAIL_ADDR") or "").strip(),
+            "mail_city":    str(attrs.get("MAILCITY") or attrs.get("MAIL_CITY") or "").strip(),
+            "mail_state":   str(attrs.get("MAILSTATE") or "FL").strip(),
+            "mail_zip":     str(attrs.get("MAILZIP") or attrs.get("MAIL_ZIP") or "").strip(),
+        }
+
 # ─────────────────────────────────────────────
 # DOCUMENT TYPE MAP
 # ─────────────────────────────────────────────
@@ -143,6 +252,7 @@ class ClerkAPIScraper:
         self.date_from = (datetime.now() - timedelta(days=lookback_days)).strftime("%m/%d/%Y")
         self.date_to   = datetime.now().strftime("%m/%d/%Y")
         self.session   = requests.Session()
+        self.pa        = PALookup()
         self._setup_session()
 
     def _setup_session(self):
@@ -440,6 +550,13 @@ class ClerkAPIScraper:
                     else:
                         clerk_url = f"https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx"
 
+                    # Start with address from clerk record
+                    prop_addr_raw = str(item.get("address") or item.get("addressnounit") or "").strip()
+
+                    # Enrich with PA data using folio number
+                    folio = str(item.get("foliO_NUMBER") or "").strip()
+                    pa_data = self.pa.lookup(folio) if folio and folio not in ("", "None") else {}
+
                     records.append({
                         "doc_num":      doc_num,
                         "doc_type":     doc_code,
@@ -450,14 +567,14 @@ class ClerkAPIScraper:
                         "grantee":      str(item.get("seconD_PARTY") or "").strip(),
                         "amount":       amount,
                         "legal":        str(item.get("legaL_DESCRIPTION") or "").strip(),
-                        "prop_address": str(item.get("address") or item.get("addressnounit") or "").strip(),
-                        "prop_city":    "",
+                        "prop_address": pa_data.get("prop_address") or prop_addr_raw,
+                        "prop_city":    pa_data.get("prop_city", ""),
                         "prop_state":   "FL",
-                        "prop_zip":     "",
-                        "mail_address": "",
-                        "mail_city":    "",
-                        "mail_state":   "",
-                        "mail_zip":     "",
+                        "prop_zip":     pa_data.get("prop_zip", ""),
+                        "mail_address": pa_data.get("mail_address", ""),
+                        "mail_city":    pa_data.get("mail_city", ""),
+                        "mail_state":   pa_data.get("mail_state", "FL"),
+                        "mail_zip":     pa_data.get("mail_zip", ""),
                         "clerk_url":    clerk_url,
                         "flags":        [],
                         "score":        0,
