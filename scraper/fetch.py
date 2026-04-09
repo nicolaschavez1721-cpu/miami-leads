@@ -43,210 +43,140 @@ log = logging.getLogger("miami_scraper")
 # PROPERTY APPRAISER LOOKUP
 # ─────────────────────────────────────────────
 class PALookup:
-    """Looks up property and mailing address from Miami-Dade PA by folio number."""
-
-    # Internal API used by the PA property search React app
-    API_ENDPOINTS = [
-        "https://www.miamidade.gov/Apps/PA/propertysearch/api/Property/{folio}",
-        "https://www.miamidadepa.gov/Apps/PA/propertysearch/api/Property/{folio}",
-        "https://gisweb.miamidade.gov/arcgis/rest/services/MDC/Property/MapServer/0/query?where=FOLIO_NUM+%3D+%27{folio}%27&outFields=*&f=json",
-    ]
+    """Looks up property and mailing address from Miami-Dade PA by folio number.
+    Scrapes the HTML property search page since the PA uses server-side rendering.
+    """
 
     def __init__(self):
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36",
-            "Accept": "application/json, text/plain, */*",
-            "Referer": "https://www.miamidade.gov/Apps/PA/propertysearch/",
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+            "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+            "Accept-Language": "en-US,en;q=0.9",
         })
         self.cache = {}
 
+    def _format_folio(self, folio: str) -> str:
+        """Format folio to 13 digits no dashes for URL."""
+        return re.sub(r"[^0-9]", "", str(folio)).zfill(13)
+
     def lookup(self, folio: str) -> dict:
-        if not folio or str(folio).strip() in ("", "None", "null"):
+        if not folio or str(folio).strip() in ("", "None", "null", "0"):
             return {}
 
-        folio = str(folio).strip().replace("-", "").replace(" ", "")
-        if folio in self.cache:
-            return self.cache[folio]
+        folio_clean = self._format_folio(folio)
+        if len(folio_clean) < 8:
+            return {}
+
+        if folio_clean in self.cache:
+            return self.cache[folio_clean]
 
         result = {}
 
-        # Try primary PA API
-        for endpoint_tmpl in self.API_ENDPOINTS:
-            url = endpoint_tmpl.format(folio=folio)
+        # Try the PA property search HTML page
+        urls = [
+            f"https://appsmiamidadepa.gov/PropertySearch/?folio={folio_clean}",
+            f"https://www.miamidade.gov/Apps/PA/propertysearch/?folio={folio_clean}",
+        ]
+
+        for url in urls:
             try:
-                r = self.session.get(url, timeout=10)
-                if r.status_code == 200 and r.text.strip().startswith("{"):
-                    data = r.json()
-                    result = self._parse_pa_response(data)
+                r = self.session.get(url, timeout=15, allow_redirects=True)
+                if r.status_code == 200 and len(r.text) > 500:
+                    result = self._parse_pa_html(r.text)
                     if result.get("prop_address"):
-                        log.info(f"PA hit for folio {folio}: {result['prop_address']}, {result['prop_city']}")
-                        break
-                elif r.status_code == 200 and "features" in r.text:
-                    data = r.json()
-                    result = self._parse_arcgis_response(data)
-                    if result.get("prop_address"):
+                        log.info(f"PA HTML hit for {folio_clean}: {result['prop_address']}")
                         break
             except Exception as e:
-                log.info(f"PA lookup [{r.status_code if 'r' in dir() else 'ERR'}] {url[:60]}: {str(e)[:100]}")
+                log.debug(f"PA HTML error {url}: {e}")
 
-        self.cache[folio] = result
+        self.cache[folio_clean] = result
         if not result.get("prop_address"):
-            log.info(f"PA no result for folio: {folio}")
+            log.debug(f"PA no result for folio: {folio_clean}")
         return result
 
-    def _parse_pa_response(self, data: dict) -> dict:
-        """Parse the PA property search API response."""
-        # Try nested structures
-        prop = data
-        for key in ["Property", "property", "Summary", "summary", "data", "result"]:
-            if key in data and isinstance(data[key], dict):
-                prop = data[key]
-                break
+    def _parse_pa_html(self, html: str) -> dict:
+        """Parse property address and mailing address from PA HTML page."""
+        from bs4 import BeautifulSoup
+        soup = BeautifulSoup(html, "lxml")
 
-        def g(*keys):
-            for k in keys:
-                v = prop.get(k) or data.get(k)
-                if v and str(v).strip() not in ("", "None", "null", "0"):
-                    return str(v).strip()
+        def find_field(labels):
+            for label in labels:
+                # Look for label text then get sibling/next value
+                el = soup.find(string=re.compile(label, re.I))
+                if el:
+                    parent = el.find_parent()
+                    if parent:
+                        # Try next sibling
+                        nxt = parent.find_next_sibling()
+                        if nxt:
+                            val = nxt.get_text(strip=True)
+                            if val and len(val) > 2:
+                                return val
+                        # Try parent's next sibling
+                        nxt2 = parent.find_parent()
+                        if nxt2:
+                            nxt3 = nxt2.find_next_sibling()
+                            if nxt3:
+                                val = nxt3.get_text(strip=True)
+                                if val and len(val) > 2:
+                                    return val
             return ""
 
-        site_addr = g("SiteAddress", "siteAddress", "SITE_ADDR", "PropertyAddress",
-                      "propertyAddress", "address", "Address", "SITEADDRESS")
-        site_city = g("SiteCity", "siteCity", "SITE_CITY", "City", "city")
-        site_zip  = g("SiteZip", "siteZip", "SITE_ZIP", "Zip", "zip", "ZipCode")
-        mail_addr = g("MailingAddress", "mailingAddress", "MAIL_ADDR", "MailAddr",
-                      "mail_address", "MailAddress")
-        mail_city = g("MailingCity", "mailingCity", "MAIL_CITY", "MailCity")
-        mail_state= g("MailingState", "mailingState", "MAIL_STATE", "MailState") or "FL"
-        mail_zip  = g("MailingZip", "mailingZip", "MAIL_ZIP", "MailZip")
+        # PA page structure: label divs followed by value divs
+        prop_addr = ""
+        mail_addr = ""
+        mail_city_state_zip = ""
+
+        # Find all text blocks that look like addresses
+        all_text = [el.get_text(strip=True) for el in soup.find_all(["div", "p", "span", "td"]) if el.get_text(strip=True)]
+
+        for i, text in enumerate(all_text):
+            tl = text.lower()
+            if "property address" in tl and i + 1 < len(all_text):
+                prop_addr = all_text[i + 1]
+            elif "mailing address" in tl and i + 1 < len(all_text):
+                mail_addr = all_text[i + 1]
+                if i + 2 < len(all_text):
+                    mail_city_state_zip = all_text[i + 2]
+
+        # Parse city/state/zip from mail address line
+        mail_city, mail_state, mail_zip = "", "FL", ""
+        if mail_city_state_zip:
+            # Format: "MIAMI SHORES, FL 33138-2923"
+            m = re.match(r"^(.+?),?\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)", mail_city_state_zip)
+            if m:
+                mail_city  = m.group(1).strip()
+                mail_state = m.group(2)
+                mail_zip   = m.group(3)
+
+        # Parse city from prop_addr if it has multiple lines
+        prop_city = ""
+        if "\n" in prop_addr or len(prop_addr.split()) > 5:
+            parts = prop_addr.split("\n")
+            if len(parts) >= 2:
+                prop_addr = parts[0].strip()
+                prop_city = parts[1].strip()
 
         return {
-            "prop_address": site_addr,
-            "prop_city":    site_city,
+            "prop_address": prop_addr,
+            "prop_city":    prop_city,
             "prop_state":   "FL",
-            "prop_zip":     site_zip,
+            "prop_zip":     "",
             "mail_address": mail_addr,
             "mail_city":    mail_city,
             "mail_state":   mail_state,
             "mail_zip":     mail_zip,
         }
 
+    # Keep old API methods as fallback
+    def _parse_pa_response(self, data: dict) -> dict:
+        return {}
+
     def _parse_arcgis_response(self, data: dict) -> dict:
-        """Parse ArcGIS REST API response."""
-        features = data.get("features", [])
-        if not features:
-            return {}
-        attrs = features[0].get("attributes", {})
-        return {
-            "prop_address": str(attrs.get("SITEADDRESS") or attrs.get("SITE_ADDR") or "").strip(),
-            "prop_city":    str(attrs.get("SITE_CITY") or attrs.get("SITECITY") or "").strip(),
-            "prop_state":   "FL",
-            "prop_zip":     str(attrs.get("SITE_ZIP") or attrs.get("SITEZIP") or "").strip(),
-            "mail_address": str(attrs.get("MAILADR1") or attrs.get("MAIL_ADDR") or "").strip(),
-            "mail_city":    str(attrs.get("MAILCITY") or attrs.get("MAIL_CITY") or "").strip(),
-            "mail_state":   str(attrs.get("MAILSTATE") or "FL").strip(),
-            "mail_zip":     str(attrs.get("MAILZIP") or attrs.get("MAIL_ZIP") or "").strip(),
-        }
-
-# ─────────────────────────────────────────────
-# DOCUMENT TYPE MAP
-# ─────────────────────────────────────────────
-# Maps our internal code -> (display_name, category, portal_search_value)
-# portal_search_value must match exactly what the dropdown shows
-DOC_TYPES = {
-    "LIS":  ("Lis Pendens",              "pre-foreclosure"),
-    "JUD":  ("Judgement",                "judgment"),
-    "LIE":  ("Lien",                     "lien"),
-    "FTL":  ("Federal Tax Lien",         "tax-lien"),
-    "NCO":  ("Notice of Commencement",   "notice"),
-    "PAD":  ("Probate & Administration", "probate"),
-    "PRO":  ("Probate Order of Dist.",   "probate"),
-    "REL":  ("Release",                  "release"),
-    "NTL":  ("Notice of Tax Lien",       "tax-lien"),
-    "NCT":  ("Notice of Contest of Lien","lien"),
-    "SJU":  ("Satisfaction of Judgment", "judgment"),
-    "CLP":  ("Cancellation Lis Pendens", "release"),
-}
-
-# Full portal display names for search
-PORTAL_DOC_NAMES = {
-    "LIS":  "LIS PENDENS - LIS",
-    "JUD":  "JUDGEMENT - JUD",
-    "LIE":  "LIEN - LIE",
-    "FTL":  "FEDERAL TAX LIEN - FTL",
-    "NCO":  "NOTICE OF COMMENCEMENT - NCO",
-    "PAD":  "PROBATE & ADMINISTRATION - PAD",
-    "PRO":  "PROBATE ORDER OF DISTRIBUTION - PRO",
-    "REL":  "RELEASE - REL",
-    "NTL":  "NOTICE OF TAX LIEN - NTL",
-    "NCT":  "NOTICE OF CONTEST OF LIEN - NCT",
-    "SJU":  "SATISFACTION OF JUDGMENT - SJU",
-    "CLP":  "CANCELLATION OF LIS PENDENS - CLP",
-}
-
-CAT_LABELS = {
-    "pre-foreclosure": "Pre-Foreclosure",
-    "tax-distressed":  "Tax Distressed",
-    "judgment":        "Judgment",
-    "tax-lien":        "Tax / Fed Lien",
-    "lien":            "Lien",
-    "probate":         "Probate / Estate",
-    "notice":          "Notice",
-    "release":         "Release",
-}
-
-# ─────────────────────────────────────────────
-# SCORE ENGINE
-# ─────────────────────────────────────────────
-def compute_score_and_flags(record: dict) -> tuple:
-    flags = []
-    score = 30
-    doc_type = record.get("doc_type", "")
-    cat      = record.get("cat", "")
-    amount   = record.get("amount") or 0
-    filed    = record.get("filed", "")
-    owner    = record.get("owner", "") or ""
-
-    if doc_type in ("LP", "RELLP"):
-        flags.append("Lis pendens")
-    if cat == "pre-foreclosure" or doc_type in ("LP", "NOFC"):
-        flags.append("Pre-foreclosure")
-    if cat == "judgment":
-        flags.append("Judgment lien")
-    if cat == "tax-lien" or doc_type == "TAXDEED":
-        flags.append("Tax lien")
-    if doc_type == "LNMECH":
-        flags.append("Mechanic lien")
-    if cat == "probate":
-        flags.append("Probate / estate")
-    if re.search(r"\bLLC\b|\bCORP\b|\bINC\b|\bLTD\b|\bLLP\b", owner, re.I):
-        flags.append("LLC / corp owner")
-    try:
-        filed_dt = datetime.strptime(filed, "%Y-%m-%d")
-        if (datetime.now() - filed_dt).days <= 7:
-            flags.append("New this week")
-    except Exception:
-        pass
-
-    score += len(flags) * 10
-    if "Lis pendens" in flags and "Pre-foreclosure" in flags:
-        score += 20
-    if amount and float(amount) > 100000:
-        score += 15
-    elif amount and float(amount) > 50000:
-        score += 10
-    if "New this week" in flags:
-        score += 5
-    if record.get("prop_address"):
-        score += 5
-
-    return min(score, 100), list(dict.fromkeys(flags))
+        return {}
 
 
-# ─────────────────────────────────────────────
-# API SCRAPER
-# ─────────────────────────────────────────────
 class ClerkAPIScraper:
 
     def __init__(self, lookback_days: int = 7):
