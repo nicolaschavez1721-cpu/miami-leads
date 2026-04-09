@@ -423,8 +423,13 @@ async function loadData() {
     const d = await r.json();
 
     allRecords = d.records || [];
-    document.getElementById('fetchTime').innerHTML =
-      '<span class="pulse"></span>' + new Date(d.fetched_at).toLocaleString('en-US', {timeZone:'America/New_York'}) + ' ET';
+    const fetchDate = new Date(d.fetched_at);
+    const etStr = fetchDate.toLocaleString('en-US', {
+      timeZone: 'America/New_York',
+      month: 'numeric', day: 'numeric', year: 'numeric',
+      hour: 'numeric', minute: '2-digit', hour12: true
+    });
+    document.getElementById('fetchTime').innerHTML = '<span class="pulse"></span>' + etStr + ' ET';
 
     // Stats
     const fc    = allRecords.filter(r => r.cat === 'pre-foreclosure').length;
