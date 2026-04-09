@@ -1,38 +1,32 @@
 """
 Miami-Dade County Motivated Seller Lead Scraper
-Logs in to the Clerk portal to bypass reCAPTCHA, then searches by doc type and date range.
+Calls the portal's internal REST API directly using session cookies.
 """
 
-import asyncio
 import json
 import csv
 import re
 import os
 import logging
-import random
+import requests
 from datetime import datetime, timedelta
 from pathlib import Path
-
-from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
 LOOKBACK_DAYS  = 7
-MAX_RETRIES    = 3
-RETRY_DELAY    = 5
 
+CLERK_SESSION  = os.environ.get("CLERK_SESSION", "")
+CLERK_NSC      = os.environ.get("CLERK_NSC", "")
 CLERK_EMAIL    = os.environ.get("CLERK_EMAIL", "")
 CLERK_PASSWORD = os.environ.get("CLERK_PASSWORD", "")
 
-PORTAL_HOME    = "https://onlineservices.miamidadeclerk.gov/officialrecords"
-LOGIN_URL      = "https://www2.miamidadeclerk.gov/PremierServices/login.aspx"
-SEARCH_URL     = f"{PORTAL_HOME}/StandardSearch.aspx"
-NAME_DOC_URL   = f"{PORTAL_HOME}/SearchName.aspx"
+API_BASE = "https://onlineservices.miamidadeclerk.gov/officialrecords/api"
 
-ROOT_DIR       = Path(__file__).parent.parent
-DASHBOARD_DIR  = ROOT_DIR / "dashboard"
-DATA_DIR       = ROOT_DIR / "data"
+ROOT_DIR      = Path(__file__).parent.parent
+DASHBOARD_DIR = ROOT_DIR / "dashboard"
+DATA_DIR      = ROOT_DIR / "data"
 
 DASHBOARD_DIR.mkdir(parents=True, exist_ok=True)
 DATA_DIR.mkdir(parents=True, exist_ok=True)
@@ -126,572 +120,312 @@ def compute_score_and_flags(record: dict) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# SCRAPER
+# API SCRAPER
 # ─────────────────────────────────────────────
-class ClerkScraper:
+class ClerkAPIScraper:
 
     def __init__(self, lookback_days: int = 7):
         self.lookback_days = lookback_days
         self.date_from = (datetime.now() - timedelta(days=lookback_days)).strftime("%m/%d/%Y")
         self.date_to   = datetime.now().strftime("%m/%d/%Y")
-        self.logged_in = False
+        self.session   = requests.Session()
+        self._setup_session()
 
-    async def _screenshot(self, page, name):
-        try:
-            path = DATA_DIR / f"debug_{name}.png"
-            await page.screenshot(path=str(path), full_page=True)
-            log.info(f"Screenshot: {path}")
-        except Exception as e:
-            log.debug(f"Screenshot error: {e}")
+    def _setup_session(self):
+        """Configure session with cookies and headers."""
+        # Build cookie string
+        cookie_parts = []
+        if CLERK_SESSION:
+            cookie_parts.append(f".PremierIDDade={CLERK_SESSION}")
+        if CLERK_NSC:
+            cookie_parts.append(f"NSC_JOeqtbnye4rqvqae52yysbdjdcwntcw={CLERK_NSC}")
 
-    async def _login(self, page) -> bool:
-        """Inject session cookie to bypass login and reCAPTCHA."""
-        clerk_session = os.environ.get("CLERK_SESSION", "")
+        self.session.headers.update({
+            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/146.0.0.0 Safari/537.36",
+            "Accept": "application/json, text/plain, */*",
+            "Accept-Language": "en-US,en;q=0.9",
+            "Accept-Encoding": "gzip, deflate, br, zstd",
+            "Referer": "https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx",
+            "Origin": "https://onlineservices.miamidadeclerk.gov",
+            "Sec-Ch-Ua": '"Chromium";v="146", "Not-A.Brand";v="24", "Google Chrome";v="146"',
+            "Sec-Ch-Ua-Mobile": "?0",
+            "Sec-Ch-Ua-Platform": '"macOS"',
+            "Sec-Fetch-Dest": "empty",
+            "Sec-Fetch-Mode": "cors",
+            "Sec-Fetch-Site": "same-origin",
+            "Connection": "keep-alive",
+        })
 
-        if clerk_session:
-            log.info("Injecting session cookie...")
-            try:
-                # First visit the portal to establish context
-                await page.goto(PORTAL_HOME, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(2)
+        if cookie_parts:
+            self.session.headers["Cookie"] = "; ".join(cookie_parts)
 
-                # Inject the PremierID session cookie
-                # Get NSC load balancer cookie from env if available
-                nsc_cookie = os.environ.get("CLERK_NSC", "")
+        log.info(f"Session configured with {len(cookie_parts)} auth cookies")
 
-                cookies = [
-                    {
-                        "name": ".PremierIDDade",
-                        "value": clerk_session,
-                        "domain": "onlineservices.miamidadeclerk.gov",
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": True,
-                    },
-                    {
-                        "name": ".PremierIDDade",
-                        "value": clerk_session,
-                        "domain": "www2.miamidadeclerk.gov",
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": True,
-                    },
-                ]
-                if nsc_cookie:
-                    cookies.append({
-                        "name": "NSC_JOeqtbnye4rqvqae52yysbdjdcwntcw",
-                        "value": nsc_cookie,
-                        "domain": "onlineservices.miamidadeclerk.gov",
-                        "path": "/",
-                        "secure": True,
-                        "httpOnly": True,
-                    })
-                await page.context.add_cookies(cookies)
-                log.info("Session cookie injected")
-
-                # Reload to apply cookie
-                await page.goto(PORTAL_HOME, wait_until="networkidle", timeout=30000)
-                await asyncio.sleep(2)
-                await self._screenshot(page, "after_cookie_inject")
-
-                content = await page.content()
-                text = await page.evaluate("() => document.body ? document.body.innerText.slice(0,300) : ''")
-                log.info(f"Portal after cookie: {text[:200].replace(chr(10),' ')}")
-
-                self.logged_in = True
-                return True
-            except Exception as e:
-                log.error(f"Cookie injection error: {e}")
-
-        # Fall back to form login
+    def _login_api(self) -> bool:
+        """Try to login via API endpoint."""
         if not CLERK_EMAIL or not CLERK_PASSWORD:
-            log.warning("No credentials provided — will attempt without login")
             return False
 
-        log.info(f"Logging in as {CLERK_EMAIL}...")
         try:
-            await page.goto(PORTAL_HOME, wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(2)
+            # Try the UMS login endpoint
+            login_url = "https://www2.miamidadeclerk.gov/PremierServices/api/Account/login"
+            payload = {
+                "userName": CLERK_EMAIL,
+                "password": CLERK_PASSWORD,
+            }
+            r = self.session.post(login_url, json=payload, timeout=20)
+            log.info(f"Login API response: {r.status_code} - {r.text[:200]}")
 
-            # Click Register/Login link
-            for sel in ["text=Register/Login", "text=Login", "a[href*='login']", "a[href*='Login']"]:
-                try:
-                    el = await page.query_selector(sel)
-                    if el:
-                        await el.click()
-                        await asyncio.sleep(2)
-                        log.info(f"Clicked login via: {sel}")
-                        break
-                except Exception:
-                    pass
+            if r.status_code == 200:
+                data = r.json()
+                token = data.get("token") or data.get("access_token") or data.get("sessionId")
+                if token:
+                    self.session.headers["Authorization"] = f"Bearer {token}"
+                    log.info("Got bearer token from login API")
+                    return True
 
-            await self._screenshot(page, "login_page")
-
-            # The login page has two sections:
-            # Left: "Registered User" with User ID/Email + Password + LOGIN button
-            # Right: "New Users" registration
-            # We need to fill the LEFT side fields
-
-            # Find all inputs on the page
-            all_inputs = await page.evaluate("""() => {
-                return Array.from(document.querySelectorAll('input')).map((el, i) => ({
-                    index: i,
-                    id: el.id, name: el.name, type: el.type,
-                    placeholder: el.placeholder,
-                    visible: el.offsetParent !== null
-                }));
-            }""")
-            log.info(f"Login page inputs: {all_inputs}")
-
-            # Fill by index - first text input is email, first password is password
-            # Use nth-of-type or position-based filling
-            text_inputs = [i for i in all_inputs if i['type'] in ('text', 'email', '') and i['visible']]
-            pass_inputs = [i for i in all_inputs if i['type'] == 'password' and i['visible']]
-
-            log.info(f"Text inputs: {text_inputs}")
-            log.info(f"Pass inputs: {pass_inputs}")
-
-            # Fill email - try by label proximity, then by position
-            filled_email = False
-            for strategy in [
-                "input[type='text']:first-of-type",
-                "input:not([type='password']):not([type='submit']):not([type='hidden'])",
-                "//label[contains(text(),'User') or contains(text(),'Email')]/following-sibling::input",
-                "//div[contains(@class,'register') or contains(text(),'Registered')]//input[@type='text']",
-            ]:
-                try:
-                    if strategy.startswith("//"):
-                        el = await page.query_selector(f"xpath={strategy}")
-                    else:
-                        # Get first matching element in left column
-                        els = await page.query_selector_all(strategy)
-                        el = els[0] if els else None
-                    if el and await el.is_visible():
-                        await el.fill(CLERK_EMAIL)
-                        log.info(f"Filled email via: {strategy}")
-                        filled_email = True
-                        break
-                except Exception as e:
-                    log.debug(f"Email fill try {strategy}: {e}")
-
-            if not filled_email:
-                # Last resort: click on first visible text input and type
-                try:
-                    await page.click("input[type='text']")
-                    await page.keyboard.type(CLERK_EMAIL)
-                    log.info("Filled email by keyboard")
-                    filled_email = True
-                except Exception as e:
-                    log.warning(f"Could not fill email: {e}")
-
-            # Fill password
-            filled_pass = False
-            for strategy in ["input[type='password']"]:
-                try:
-                    els = await page.query_selector_all(strategy)
-                    el = els[0] if els else None
-                    if el and await el.is_visible():
-                        await el.fill(CLERK_PASSWORD)
-                        log.info(f"Filled password via: {strategy}")
-                        filled_pass = True
-                        break
-                except Exception as e:
-                    log.debug(f"Password fill try: {e}")
-
-            log.info(f"Fill status: email={filled_email}, password={filled_pass}")
-
-            # Click LOGIN button (not REGISTER)
-            submitted = False
-            for strategy in [
-                "//button[normalize-space(text())='LOGIN']",
-                "//input[@value='LOGIN' or @value='Login']",
-                "button:has-text('LOGIN')",
-                "input[value='LOGIN']",
-            ]:
-                try:
-                    if strategy.startswith("//"):
-                        el = await page.query_selector(f"xpath={strategy}")
-                    else:
-                        el = await page.query_selector(strategy)
-                    if el and await el.is_visible():
-                        await el.click()
-                        log.info(f"Clicked LOGIN via: {strategy}")
-                        submitted = True
-                        break
-                except Exception as e:
-                    log.debug(f"Submit try {strategy}: {e}")
-
-            if not submitted:
-                await page.keyboard.press("Enter")
-                log.info("Submitted via Enter key")
-
-            await page.wait_for_load_state("networkidle", timeout=20000)
-            await asyncio.sleep(2)
-            await self._screenshot(page, "after_login")
-
-            # Check if logged in
-            url = page.url
-            content = await page.content()
-            if any(x in content.lower() for x in ["my account", "logout", "welcome", "nicholas", "nicolas"]):
-                log.info("Login successful!")
-                self.logged_in = True
-                return True
-            else:
-                log.warning(f"Login may have failed. URL: {url}")
-                log.warning(f"Page snippet: {content[:300]}")
-                return False
+            # Try form-based login
+            login_url2 = "https://www2.miamidadeclerk.gov/PremierServices/login.aspx"
+            r2 = self.session.get(login_url2, timeout=20)
+            # Get the page to grab any form tokens
+            log.info(f"Login page: {r2.status_code}")
 
         except Exception as e:
-            log.error(f"Login error: {e}")
-            return False
+            log.warning(f"Login API error: {e}")
 
-    async def _search_doc_type(self, page, doc_code: str) -> list[dict]:
-        """Navigate to Name/Document search and search by doc type + date range."""
+        return False
+
+    def _check_login_status(self) -> bool:
+        """Check if we're logged in via the isLoggedIn API."""
+        try:
+            r = self.session.get(
+                f"{API_BASE}/Environment/isLoggedIn",
+                timeout=15
+            )
+            log.info(f"isLoggedIn: {r.status_code} - {r.text[:200]}")
+            if r.status_code == 200:
+                data = r.json()
+                is_logged = data.get("isLoggedIn") or data.get("loggedIn") or data.get("authenticated")
+                log.info(f"Logged in status: {is_logged}")
+                return bool(is_logged)
+        except Exception as e:
+            log.warning(f"Login check error: {e}")
+        return False
+
+    def _discover_search_api(self):
+        """Try to find the search API endpoint by probing common patterns."""
+        # First get the status to see what APIs are available
+        try:
+            r = self.session.get(f"{API_BASE}/Environment/getStatus", timeout=15)
+            log.info(f"getStatus: {r.status_code} - {r.text[:300]}")
+        except Exception as e:
+            log.warning(f"getStatus error: {e}")
+
+        # Try GetDate to verify API is working
+        try:
+            r = self.session.get(f"{API_BASE}/Environment/GetDate", timeout=15)
+            log.info(f"GetDate: {r.status_code} - {r.text[:200]}")
+        except Exception as e:
+            log.warning(f"GetDate error: {e}")
+
+        # Try to find search endpoints
+        search_endpoints = [
+            f"{API_BASE}/Search/StandardSearch",
+            f"{API_BASE}/Search/NameDocumentSearch",
+            f"{API_BASE}/OfficialRecords/Search",
+            f"{API_BASE}/Search",
+            f"{API_BASE}/Records/Search",
+            f"{API_BASE}/Document/Search",
+        ]
+
+        for ep in search_endpoints:
+            try:
+                # Try GET first
+                r = self.session.get(ep, timeout=10)
+                log.info(f"Probe GET {ep}: {r.status_code} - {r.text[:100]}")
+
+                # Try POST
+                r2 = self.session.post(ep, json={}, timeout=10)
+                log.info(f"Probe POST {ep}: {r2.status_code} - {r2.text[:100]}")
+            except Exception as e:
+                log.debug(f"Probe {ep}: {e}")
+
+    def _search_by_doctype(self, doc_code: str) -> list[dict]:
+        """Search for records by document type and date range."""
         doc_label, cat = DOC_TYPES.get(doc_code, (doc_code, "other"))
         records = []
 
-        log.info(f"Searching {doc_code} ({doc_label}) from {self.date_from} to {self.date_to}")
+        # Common search payload formats
+        payloads = [
+            {
+                "documentType": doc_code,
+                "startDate": self.date_from,
+                "endDate": self.date_to,
+                "pageNumber": 1,
+                "pageSize": 200,
+            },
+            {
+                "docType": doc_code,
+                "dateFrom": self.date_from,
+                "dateTo": self.date_to,
+            },
+            {
+                "DocType": doc_code,
+                "RecordedDateFrom": self.date_from,
+                "RecordedDateTo": self.date_to,
+            },
+        ]
 
-        try:
-            # Go to the search page
-            await page.goto(SEARCH_URL, wait_until="networkidle", timeout=30000)
-            await asyncio.sleep(2)
+        # Search endpoints to try
+        endpoints = [
+            f"{API_BASE}/Search/StandardSearch",
+            f"{API_BASE}/Search/NameDocumentSearch",
+            f"{API_BASE}/OfficialRecords/Search",
+            f"{API_BASE}/Search",
+            f"{API_BASE}/Document/Search",
+            f"{API_BASE}/Records/Search",
+            # Try with query params instead
+        ]
 
-            await self._screenshot(page, f"search_{doc_code}_start")
+        # Also try GET with query params
+        get_urls = [
+            f"{API_BASE}/Search/StandardSearch?documentType={doc_code}&startDate={self.date_from}&endDate={self.date_to}",
+            f"{API_BASE}/Search?docType={doc_code}&dateFrom={self.date_from}&dateTo={self.date_to}",
+        ]
 
-            # Log all inputs
-            form_info = await page.evaluate("""() => {
-                const r = {inputs: [], selects: [], links: []};
-                document.querySelectorAll('input').forEach(e => r.inputs.push({
-                    id: e.id, name: e.name, type: e.type,
-                    placeholder: e.placeholder, value: e.value.slice(0,30)
-                }));
-                document.querySelectorAll('select').forEach(e => r.selects.push({
-                    id: e.id, name: e.name,
-                    options: Array.from(e.options).map(o => o.value + ':' + o.text).slice(0,20)
-                }));
-                document.querySelectorAll('a').forEach(e => {
-                    if (e.innerText.trim()) r.links.push({text: e.innerText.trim(), href: e.href});
-                });
-                return r;
-            }""")
+        for url in get_urls:
+            try:
+                r = self.session.get(url, timeout=20)
+                log.info(f"GET {url.split('?')[0]}: {r.status_code} - {r.text[:200]}")
+                if r.status_code == 200 and len(r.text) > 50:
+                    data = self._parse_api_response(r, doc_code, cat, doc_label)
+                    if data:
+                        records.extend(data)
+                        return records
+            except Exception as e:
+                log.debug(f"GET error: {e}")
 
-            log.info(f"Inputs: {form_info['inputs']}")
-            log.info(f"Selects: {form_info['selects']}")
-            log.info(f"Nav links: {[l for l in form_info['links'] if any(x in l['text'].lower() for x in ['search','name','doc','record'])]}")
-
-            # Try to find and click "Name/Document" search link in sidebar
-            for link in form_info['links']:
-                if any(x in link['text'].lower() for x in ['name/doc', 'name doc', 'document']):
-                    try:
-                        await page.goto(link['href'], wait_until="networkidle", timeout=20000)
-                        await asyncio.sleep(2)
-                        log.info(f"Navigated to: {link['href']}")
-                        break
-                    except Exception:
-                        pass
-
-            await self._screenshot(page, f"search_{doc_code}_form")
-
-            # Re-read form after navigation
-            form_info2 = await page.evaluate("""() => {
-                const r = {inputs: [], selects: []};
-                document.querySelectorAll('input').forEach(e => r.inputs.push({
-                    id: e.id, name: e.name, type: e.type,
-                    placeholder: e.placeholder, value: e.value.slice(0,30),
-                    label: ''
-                }));
-                document.querySelectorAll('select').forEach(e => r.selects.push({
-                    id: e.id, name: e.name,
-                    options: Array.from(e.options).map(o => o.value + ':' + o.text).slice(0,30)
-                }));
-                return r;
-            }""")
-            log.info(f"Form inputs after nav: {form_info2['inputs']}")
-            log.info(f"Form selects after nav: {form_info2['selects']}")
-
-            # Fill date range fields
-            filled = 0
-            for inp in form_info2['inputs']:
-                iid   = (inp.get('id') or '').lower()
-                iname = (inp.get('name') or '').lower()
-                iph   = (inp.get('placeholder') or '').lower()
-                key   = iid + iname + iph
-
-                sel = f"#{inp['id']}" if inp.get('id') else f"input[name='{inp['name']}']" if inp.get('name') else None
-                if not sel:
-                    continue
-
-                if any(x in key for x in ['startdate','start_date','datefrom','date_from','begindate','fromdate','datebegin','recordstart']):
-                    try:
-                        await page.fill(sel, self.date_from)
-                        log.info(f"Filled start date {sel} = {self.date_from}")
-                        filled += 1
-                    except Exception as e:
-                        log.debug(f"Fill error: {e}")
-
-                elif any(x in key for x in ['enddate','end_date','dateto','date_to','throughdate','todate','dateend','recordend']):
-                    try:
-                        await page.fill(sel, self.date_to)
-                        log.info(f"Filled end date {sel} = {self.date_to}")
-                        filled += 1
-                    except Exception as e:
-                        log.debug(f"Fill error: {e}")
-
-                elif any(x in key for x in ['doctype','doc_type','documenttype','instrumenttype','recordtype']):
-                    try:
-                        await page.fill(sel, doc_code)
-                        log.info(f"Filled doc type {sel} = {doc_code}")
-                        filled += 1
-                    except Exception as e:
-                        log.debug(f"Fill error: {e}")
-
-            # Fill doc type selects
-            for sel_el in form_info2['selects']:
-                sid = (sel_el.get('id') or sel_el.get('name') or '').lower()
-                if any(x in sid for x in ['doctype','doc_type','documenttype','instrumenttype']):
-                    sel = f"#{sel_el['id']}" if sel_el.get('id') else f"select[name='{sel_el['name']}']"
-                    try:
-                        await page.select_option(sel, value=doc_code)
-                        log.info(f"Selected doc type {sel} = {doc_code}")
-                        filled += 1
-                    except Exception:
-                        try:
-                            await page.select_option(sel, label=doc_code)
-                            filled += 1
-                        except Exception as e:
-                            log.debug(f"Select error: {e}")
-
-            log.info(f"Filled {filled} fields")
-
-            # Submit
-            submitted = False
-            for btn_sel in [
-                "input[type='submit']",
-                "button[type='submit']",
-                "button:has-text('Search')",
-                "input[value*='Search']",
-                "button:has-text('Find')",
-            ]:
+        for endpoint in endpoints:
+            for payload in payloads:
                 try:
-                    el = await page.query_selector(btn_sel)
-                    if el:
-                        await el.click()
-                        submitted = True
-                        log.info(f"Submitted via {btn_sel}")
-                        break
-                except Exception:
-                    pass
-
-            if not submitted:
-                await page.keyboard.press("Enter")
-
-            await page.wait_for_load_state("networkidle", timeout=30000)
-            await asyncio.sleep(3)
-            await self._screenshot(page, f"results_{doc_code}")
-
-            # Parse results
-            records = await self._parse_results(page, doc_code, cat, doc_label)
-            log.info(f"  {doc_code}: {len(records)} records")
-
-        except Exception as e:
-            log.error(f"Search error for {doc_code}: {e}")
+                    r = self.session.post(endpoint, json=payload, timeout=20)
+                    log.info(f"POST {endpoint}: {r.status_code} - {r.text[:200]}")
+                    if r.status_code == 200 and len(r.text) > 50:
+                        data = self._parse_api_response(r, doc_code, cat, doc_label)
+                        if data:
+                            records.extend(data)
+                            return records
+                except Exception as e:
+                    log.debug(f"POST error: {e}")
 
         return records
 
-    async def _parse_results(self, page, doc_code, cat, doc_label) -> list[dict]:
+    def _parse_api_response(self, response, doc_code, cat, doc_label) -> list[dict]:
+        """Parse API JSON response into records."""
         records = []
+        try:
+            data = response.json()
+            log.info(f"API response type: {type(data)} keys: {list(data.keys()) if isinstance(data, dict) else 'list'}")
 
-        # Log page text for debugging
-        page_text = await page.evaluate("() => document.body ? document.body.innerText.slice(0, 500) : ''")
-        log.info(f"Results page text: {page_text[:300].replace(chr(10), ' ')}")
-
-        # Extract all card/table data via JS
-        data = await page.evaluate("""() => {
-            const results = [];
-
-            // Try table rows
-            document.querySelectorAll('table').forEach(table => {
-                const rows = table.querySelectorAll('tr');
-                if (rows.length < 2) return;
-                const headers = Array.from(rows[0].querySelectorAll('th,td')).map(c => c.innerText.trim().toLowerCase());
-                for (let i = 1; i < rows.length; i++) {
-                    const cells = Array.from(rows[i].querySelectorAll('td'));
-                    if (cells.length < 2) continue;
-                    const row = {_type: 'table', _headers: headers};
-                    cells.forEach((c, idx) => {
-                        row['col_' + idx] = c.innerText.trim();
-                        const a = c.querySelector('a');
-                        if (a) row['link_' + idx] = a.href;
-                    });
-                    results.push(row);
-                }
-            });
-
-            // Try card format (new portal)
-            document.querySelectorAll('[class*="card"], [class*="result"], [class*="record"], [class*="item"]').forEach(card => {
-                const text = card.innerText.trim();
-                if (text.length < 10 || text.length > 3000) return;
-                const links = Array.from(card.querySelectorAll('a')).map(a => a.href);
-                results.push({_type: 'card', text: text, links: links});
-            });
-
-            return results;
-        }""")
-
-        log.info(f"Raw data items: {len(data)}")
-
-        for item in data:
-            try:
-                if item.get('_type') == 'table':
-                    headers = item.get('_headers', [])
-
-                    def hcol(frag):
-                        for i, h in enumerate(headers):
-                            if frag in h:
-                                return item.get(f'col_{i}', '')
-                        return ''
-
-                    def col(i):
-                        return item.get(f'col_{i}', '')
-
-                    doc_num  = hcol('cfn') or hcol('doc') or hcol('file') or hcol('instrument') or col(0)
-                    filed    = hcol('date') or hcol('record') or col(1)
-                    grantor  = hcol('grantor') or hcol('owner') or hcol('party') or col(2)
-                    grantee  = hcol('grantee') or col(3)
-                    legal    = hcol('legal') or col(4)
-                    amount_s = hcol('amount') or hcol('consider') or col(5)
-
-                    clerk_url = ""
-                    for i in range(8):
-                        lnk = item.get(f'link_{i}', '')
-                        if lnk and 'clerk' in lnk.lower():
-                            clerk_url = lnk
-                            break
-
-                elif item.get('_type') == 'card':
-                    # Parse card text
-                    text = item.get('text', '')
-                    lines = [l.strip() for l in text.split('\n') if l.strip()]
-                    doc_num  = lines[0] if lines else ''
-                    filed    = ''
-                    grantor  = ''
-                    grantee  = ''
-                    legal    = ''
-                    amount_s = ''
-                    clerk_url = item.get('links', [''])[0] if item.get('links') else ''
-
-                    # Try to extract fields from card text
-                    for line in lines:
-                        ll = line.lower()
-                        if 'recorded' in ll or 'filed' in ll or re.search(r'\d{1,2}/\d{1,2}/\d{4}', line):
-                            dates = re.findall(r'\d{1,2}/\d{1,2}/\d{4}', line)
-                            if dates:
-                                filed = dates[0]
-                        if 'grantor' in ll or 'owner' in ll:
-                            grantor = line.split(':', 1)[-1].strip()
-                        if 'grantee' in ll:
-                            grantee = line.split(':', 1)[-1].strip()
-                        if '$' in line or 'amount' in ll:
-                            amount_s = line
-                else:
-                    continue
-
-                if not doc_num or len(str(doc_num).strip()) < 2:
-                    continue
-
-                # Parse date
-                filed_clean = ""
-                for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%m/%d/%y"):
-                    try:
-                        filed_clean = datetime.strptime(str(filed)[:10], fmt).strftime("%Y-%m-%d")
+            items = []
+            if isinstance(data, list):
+                items = data
+            elif isinstance(data, dict):
+                for key in ["records", "results", "data", "items", "documents", "officialRecords"]:
+                    if key in data and isinstance(data[key], list):
+                        items = data[key]
                         break
-                    except Exception:
-                        pass
 
-                # Parse amount
-                amount = None
-                if amount_s:
+            log.info(f"Items found: {len(items)}")
+
+            for item in items:
+                try:
+                    def g(*keys):
+                        for k in keys:
+                            v = item.get(k) or item.get(k.lower()) or item.get(k.upper())
+                            if v:
+                                return str(v).strip()
+                        return ""
+
+                    filed = g("recordedDate", "filedDate", "REC_DATE", "recordDate", "filed")
                     try:
-                        amount = float(re.sub(r"[^\d.]", "", str(amount_s)))
-                        if amount == 0:
-                            amount = None
+                        filed = datetime.fromisoformat(filed.replace("Z","")).strftime("%Y-%m-%d")
                     except Exception:
-                        pass
+                        for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+                            try:
+                                filed = datetime.strptime(filed[:10], fmt).strftime("%Y-%m-%d")
+                                break
+                            except Exception:
+                                pass
 
-                if not clerk_url:
+                    amount = None
+                    raw = g("consideration", "amount", "CONSIDERATION_1", "considerationAmount")
+                    if raw:
+                        try:
+                            amount = float(re.sub(r"[^\d.]", "", raw))
+                            if amount == 0:
+                                amount = None
+                        except Exception:
+                            pass
+
+                    cfn_year = g("CFN_YEAR", "cfnYear", "year")
+                    cfn_seq  = g("CFN_SEQ", "cfnSeq", "cfn", "documentNumber", "instrumentNumber")
+                    doc_num  = f"{cfn_year}-{cfn_seq}" if cfn_year and cfn_seq else cfn_seq or g("id", "recordId")
+
                     clerk_url = f"https://onlineservices.miamidadeclerk.gov/officialrecords/DocumentDetail.aspx?cfn={doc_num}"
 
-                records.append({
-                    "doc_num":      str(doc_num).strip(),
-                    "doc_type":     doc_code,
-                    "filed":        filed_clean or str(filed),
-                    "cat":          cat,
-                    "cat_label":    CAT_LABELS.get(cat, cat),
-                    "owner":        str(grantor).strip(),
-                    "grantee":      str(grantee).strip(),
-                    "amount":       amount,
-                    "legal":        str(legal).strip(),
-                    "prop_address": "",
-                    "prop_city":    "",
-                    "prop_state":   "FL",
-                    "prop_zip":     "",
-                    "mail_address": "",
-                    "mail_city":    "",
-                    "mail_state":   "",
-                    "mail_zip":     "",
-                    "clerk_url":    clerk_url,
-                    "flags":        [],
-                    "score":        0,
-                })
-            except Exception as e:
-                log.debug(f"Parse error: {e}")
+                    records.append({
+                        "doc_num":      doc_num,
+                        "doc_type":     doc_code,
+                        "filed":        filed,
+                        "cat":          cat,
+                        "cat_label":    CAT_LABELS.get(cat, cat),
+                        "owner":        g("FIRST_PARTY", "grantor", "owner", "grantorName"),
+                        "grantee":      g("SECOND_PARTY", "grantee", "granteeName"),
+                        "amount":       amount,
+                        "legal":        g("LEGAL_DESCRIPTION", "legalDescription", "legal"),
+                        "prop_address": g("siteAddress", "propertyAddress", "address"),
+                        "prop_city":    g("siteCity", "city"),
+                        "prop_state":   "FL",
+                        "prop_zip":     g("siteZip", "zip"),
+                        "mail_address": "",
+                        "mail_city":    "",
+                        "mail_state":   "",
+                        "mail_zip":     "",
+                        "clerk_url":    clerk_url,
+                        "flags":        [],
+                        "score":        0,
+                    })
+                except Exception as e:
+                    log.debug(f"Item parse error: {e}")
+
+        except Exception as e:
+            log.warning(f"Response parse error: {e} - {response.text[:200]}")
 
         return records
 
-    async def run(self) -> list[dict]:
+    def run(self) -> list[dict]:
         all_records = []
 
-        async with async_playwright() as pw:
-            browser = await pw.chromium.launch(
-                headless=True,
-                args=[
-                    "--no-sandbox",
-                    "--disable-dev-shm-usage",
-                    "--disable-blink-features=AutomationControlled",
-                    "--window-size=1366,768",
-                ]
-            )
-            context = await browser.new_context(
-                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-                viewport={"width": 1366, "height": 768},
-                locale="en-US",
-                timezone_id="America/New_York",
-            )
+        # Try API login first
+        self._login_api()
 
-            # Stealth: hide webdriver
-            await context.add_init_script("Object.defineProperty(navigator, 'webdriver', {get: () => undefined})")
+        # Check login status
+        self._check_login_status()
 
-            page = await context.new_page()
+        # Discover available API endpoints
+        self._discover_search_api()
 
-            # Login first
-            logged_in = await self._login(page)
-            log.info(f"Login status: {logged_in}")
+        # Search each doc type
+        for doc_code in DOC_TYPES:
+            try:
+                recs = self._search_by_doctype(doc_code)
+                log.info(f"{doc_code}: {len(recs)} records")
+                all_records.extend(recs)
+            except Exception as e:
+                log.error(f"Failed {doc_code}: {e}")
 
-            # Search each doc type
-            for doc_code in DOC_TYPES:
-                try:
-                    recs = await self._search_doc_type(page, doc_code)
-                    all_records.extend(recs)
-                    await asyncio.sleep(random.uniform(1, 2))
-                except Exception as e:
-                    log.error(f"Failed {doc_code}: {e}")
-
-            # Save final screenshot
-            await self._screenshot(page, "final")
-            await browser.close()
-
-        log.info(f"Total raw records: {len(all_records)}")
+        log.info(f"Total: {len(all_records)}")
         return all_records
 
 
@@ -706,8 +440,7 @@ def build_output(records: list[dict]) -> dict:
             rec["score"] = score
             rec["flags"] = flags
             enriched.append(rec)
-        except Exception as e:
-            log.debug(f"Score error: {e}")
+        except Exception:
             enriched.append(rec)
 
     enriched.sort(key=lambda r: r.get("score", 0), reverse=True)
@@ -769,11 +502,12 @@ def save_ghl_csv(records: list[dict], output_path: Path):
 def main():
     log.info("=" * 60)
     log.info("Miami-Dade Motivated Seller Scraper")
-    log.info(f"Lookback: {LOOKBACK_DAYS} days | Login: {'yes' if CLERK_EMAIL else 'no'}")
+    log.info(f"Lookback: {LOOKBACK_DAYS} days")
+    log.info(f"Auth cookies: session={'yes' if CLERK_SESSION else 'no'}, nsc={'yes' if CLERK_NSC else 'no'}")
     log.info("=" * 60)
 
-    scraper = ClerkScraper(lookback_days=LOOKBACK_DAYS)
-    records = asyncio.run(scraper.run())
+    scraper = ClerkAPIScraper(lookback_days=LOOKBACK_DAYS)
+    records = scraper.run()
     output  = build_output(records)
 
     for path in [DASHBOARD_DIR / "records.json", DATA_DIR / "records.json"]:
