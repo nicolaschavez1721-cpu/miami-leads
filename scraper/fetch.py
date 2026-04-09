@@ -84,6 +84,52 @@ CAT_LABELS = {
 }
 
 # ─────────────────────────────────────────────
+# SCORE ENGINE
+# ─────────────────────────────────────────────
+def compute_score_and_flags(record: dict) -> tuple:
+    flags = []
+    score = 30
+    doc_type = record.get("doc_type", "")
+    cat      = record.get("cat", "")
+    amount   = record.get("amount") or 0
+    filed    = record.get("filed", "")
+    owner    = record.get("owner", "") or ""
+
+    if doc_type == "LIS" or cat == "pre-foreclosure":
+        flags.append("Lis pendens")
+        flags.append("Pre-foreclosure")
+    if doc_type in ("JUD", "SJU") or cat == "judgment":
+        flags.append("Judgment lien")
+    if doc_type in ("FTL", "NTL") or cat == "tax-lien":
+        flags.append("Tax lien")
+    if doc_type == "LIE" or cat == "lien":
+        flags.append("Mechanic lien")
+    if doc_type in ("PAD", "PRO") or cat == "probate":
+        flags.append("Probate / estate")
+    if re.search(r"\bLLC\b|\bCORP\b|\bINC\b|\bLTD\b|\bLLP\b", owner, re.I):
+        flags.append("LLC / corp owner")
+    try:
+        filed_dt = datetime.strptime(filed, "%Y-%m-%d")
+        if (datetime.now() - filed_dt).days <= 7:
+            flags.append("New this week")
+    except Exception:
+        pass
+
+    score += len(flags) * 10
+    if "Lis pendens" in flags and "Pre-foreclosure" in flags:
+        score += 20
+    if amount and float(amount) > 100000:
+        score += 15
+    elif amount and float(amount) > 50000:
+        score += 10
+    if "New this week" in flags:
+        score += 5
+    if record.get("prop_address"):
+        score += 5
+
+    return min(score, 100), list(dict.fromkeys(flags))
+
+# ─────────────────────────────────────────────
 # PROPERTY APPRAISER LOOKUP
 # ─────────────────────────────────────────────
 class PALookup:
