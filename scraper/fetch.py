@@ -392,45 +392,48 @@ class ClerkAPIScraper:
                     if len(records) == 0:
                         log.info(f"Raw item sample: {str(item)[:400]}")
 
-                    def g(*keys):
-                        for k in keys:
-                            # Try exact, lowercase, uppercase, camelCase variants
-                            for kk in [k, k.lower(), k.upper(), k[0].lower()+k[1:] if k else k]:
-                                v = item.get(kk)
-                                if v is not None and str(v).strip():
-                                    return str(v).strip()
-                        return ""
-
-                    # Field names from recordingModels - try common portal field patterns
-                    filed = g("recDate", "rec_date", "recordedDate", "filedDate", "REC_DATE", "recordDate", "filed", "date")
-                    try:
-                        filed = datetime.fromisoformat(str(filed).replace("Z","").replace("T"," ").split(".")[0]).strftime("%Y-%m-%d")
-                    except Exception:
-                        for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y"):
+                    # Use exact field names from API response
+                    raw_date = item.get("reC_DATE") or item.get("doC_DATE") or ""
+                    filed = ""
+                    if raw_date:
+                        for fmt in ("%m/%d/%Y %I:%M:%S %p", "%m/%d/%Y", "%Y-%m-%d"):
                             try:
-                                filed = datetime.strptime(str(filed)[:10], fmt).strftime("%Y-%m-%d")
+                                filed = datetime.strptime(str(raw_date)[:20].strip(), fmt).strftime("%Y-%m-%d")
                                 break
                             except Exception:
                                 pass
 
-                    amount = None
-                    raw = g("consideration", "consideration1", "CONSIDERATION_1", "amount", "considerationAmount")
-                    if raw:
+                    # DATE FILTER - skip records outside our lookback window
+                    if filed:
                         try:
-                            amount = float(re.sub(r"[^\d.]", "", raw))
+                            rec_dt = datetime.strptime(filed, "%Y-%m-%d")
+                            cutoff = datetime.now() - timedelta(days=self.lookback_days)
+                            if rec_dt < cutoff:
+                                continue  # skip old records
+                        except Exception:
+                            pass
+
+                    amount = None
+                    raw_amt = item.get("consideratioN_1") or item.get("consideratioN_2")
+                    if raw_amt:
+                        try:
+                            amount = float(str(raw_amt))
                             if amount == 0:
                                 amount = None
                         except Exception:
                             pass
 
-                    cfn_year = g("cfnYear", "cfN_YEAR", "CFN_YEAR", "year", "docYear")
-                    cfn_seq  = g("cfnSeq", "cfN_SEQ", "CFN_SEQ", "cfn", "seq", "documentNumber", "instrumentNumber", "docNum")
-                    doc_num  = f"{cfn_year}-{cfn_seq}" if cfn_year and cfn_seq else cfn_seq or g("id", "recordId", "cfnMasterId")
+                    cfn_year = str(item.get("cfN_YEAR") or "")
+                    cfn_seq  = str(item.get("cfN_SEQ") or "")
+                    doc_num  = item.get("clerk_File") or (f"{cfn_year} R {cfn_seq}" if cfn_year and cfn_seq else cfn_seq)
 
-                    # Build clerk URL
-                    clerk_url = g("url", "documentUrl", "link")
-                    if not clerk_url:
-                        clerk_url = f"https://onlineservices.miamidadeclerk.gov/officialrecords/DocumentDetail.aspx?cfn={doc_num}"
+                    # Build clerk URL using the record's qs token for direct link
+                    rec_qs = item.get("qs", "")
+                    if rec_qs:
+                        import urllib.parse as _up
+                        clerk_url = f"https://onlineservices.miamidadeclerk.gov/officialrecords/DocumentDetail.aspx?qs={_up.quote(rec_qs)}"
+                    else:
+                        clerk_url = f"https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx"
 
                     records.append({
                         "doc_num":      doc_num,
@@ -438,14 +441,14 @@ class ClerkAPIScraper:
                         "filed":        filed,
                         "cat":          cat,
                         "cat_label":    CAT_LABELS.get(cat, cat),
-                        "owner":        g("firstParty", "FIRST_PARTY", "grantor", "owner", "grantorName", "partyName"),
-                        "grantee":      g("secondParty", "SECOND_PARTY", "grantee", "granteeName"),
+                        "owner":        str(item.get("firsT_PARTY") or "").strip(),
+                        "grantee":      str(item.get("seconD_PARTY") or "").strip(),
                         "amount":       amount,
-                        "legal":        g("legalDescription", "LEGAL_DESCRIPTION", "legal", "legalDesc"),
-                        "prop_address": g("siteAddress", "propertyAddress", "address", "siteAddr"),
-                        "prop_city":    g("siteCity", "city", "propertyCity"),
+                        "legal":        str(item.get("legaL_DESCRIPTION") or "").strip(),
+                        "prop_address": str(item.get("address") or item.get("addressnounit") or "").strip(),
+                        "prop_city":    "",
                         "prop_state":   "FL",
-                        "prop_zip":     g("siteZip", "zip", "propertyZip"),
+                        "prop_zip":     "",
                         "mail_address": "",
                         "mail_city":    "",
                         "mail_state":   "",
