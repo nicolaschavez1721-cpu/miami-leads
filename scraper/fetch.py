@@ -329,11 +329,9 @@ class ClerkScraper:
     SEARCH = f"{BASE}/StandardSearch.aspx"
     # Fallback URLs to try
     SEARCH_URLS = [
+        "https://www2.miamidadeclerk.gov/ocs/Search.aspx",
         "https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx",
         "https://onlineservices.miamidadeclerk.gov/officialrecords/",
-        "https://onlineservices.miami-dadeclerk.com/officialrecords/StandardSearch.aspx",
-        "https://www2.miami-dadeclerk.com/ocs/Search.aspx",
-        "https://www2.miami-dadeclerk.com/officialrecords/Search.aspx",
     ]
 
     def __init__(self, lookback_days: int = 7):
@@ -347,8 +345,8 @@ class ClerkScraper:
         for url in self.SEARCH_URLS:
             try:
                 log.info(f"Trying URL: {url}")
-                resp = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
-                await asyncio.sleep(2)
+                resp = await page.goto(url, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(3)
                 html = await page.content()
                 # Log page content for debugging
                 soup = BeautifulSoup(html, "lxml")
@@ -361,8 +359,8 @@ class ClerkScraper:
                 # Accept any page that has form elements OR content (not an error page)
                 has_form = bool(inputs or selects)
                 not_error = not any(e in html.lower() for e in ["404", "not found", "error", "forbidden"])
-                if has_form or (not_error and len(html) > 5000):
-                    log.info(f"Found working URL: {url}")
+                if has_form or (not_error and len(html) > 3000):
+                    log.info(f"Found working URL: {url} (inputs={len(inputs)}, len={len(html)})")
                     return url
             except Exception as e:
                 log.warning(f"URL {url} failed: {e}")
@@ -386,8 +384,13 @@ class ClerkScraper:
 
     async def _fill_form_and_search(self, page, doc_code: str) -> bool:
         """Fill the search form. Returns True if submitted successfully."""
-        html = await page.content()
-        soup = BeautifulSoup(html, "lxml")
+        # Wait for JS to render form inputs
+        for _ in range(10):
+            html = await page.content()
+            soup = BeautifulSoup(html, "lxml")
+            if soup.find_all("input") or soup.find_all("select"):
+                break
+            await asyncio.sleep(1)
 
         # Find all input fields
         inputs = {(i.get("id","") or i.get("name","")).lower(): (i.get("id") or i.get("name"))
@@ -489,8 +492,8 @@ class ClerkScraper:
 
         for attempt in range(MAX_RETRIES):
             try:
-                await page.goto(search_url, wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(2)
+                await page.goto(search_url, wait_until="networkidle", timeout=30000)
+                await asyncio.sleep(3)
 
                 await self._fill_form_and_search(page, doc_code)
                 await page.wait_for_load_state("networkidle", timeout=25000)
