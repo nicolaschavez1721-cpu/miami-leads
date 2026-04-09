@@ -555,7 +555,10 @@ class ClerkAPIScraper:
                     # Start with address from clerk record
                     prop_addr_raw = str(item.get("address") or item.get("addressnounit") or "").strip()
                     folio_raw = item.get("foliO_NUMBER") or item.get("folioNumber") or item.get("folio") or ""
-                    log.info(f"Record folio={folio_raw!r} addr={prop_addr_raw!r} keys_with_folio={[k for k in item.keys() if 'fol' in k.lower() or 'addr' in k.lower()]}") if len(records) < 3 else None
+                    # Log first 3 records to see folio values
+                    if len(records) < 3:
+                        log.info(f"FOLIO DEBUG: folio_raw={folio_raw!r} addr={prop_addr_raw!r}")
+                        log.info(f"FOLIO DEBUG full item folio key: foliO_NUMBER={item.get('foliO_NUMBER')!r}")
 
                     # Enrich with PA data using folio number
                     folio = str(folio_raw).strip()
