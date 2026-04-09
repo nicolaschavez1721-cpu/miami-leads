@@ -695,7 +695,7 @@ def build_output(records: list[dict], parcel: ParcelLookup) -> dict:
     with_address = sum(1 for r in enriched if r.get("prop_address"))
 
     return {
-        "fetched_at":    datetime.now().isoformat(),
+        "fetched_at":    datetime.utcnow().isoformat() + "Z",
         "source":        "Miami-Dade Clerk of Courts Official Records",
         "date_range":    {
             "from": (datetime.now() - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d"),
