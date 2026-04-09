@@ -199,45 +199,59 @@ class PALookup:
         """Call the PA JSON API and parse the response."""
         url = self.PA_API_URL.format(folio=folio)
 
+        if not hasattr(self, '_diag_count'):
+            self._diag_count = 0
+        self._diag_count += 1
+        diag = self._diag_count <= 3
+
         try:
+            if diag:
+                log.info(f"PA_DIAG #{self._diag_count} GET {url}")
+
             r = self.session.get(url, timeout=15)
 
+            if diag:
+                log.info(f"PA_DIAG #{self._diag_count} status={r.status_code} ct={r.headers.get('Content-Type','')} len={len(r.text)}")
+                log.info(f"PA_DIAG #{self._diag_count} BODY: {r.text[:2000]}")
+
             if r.status_code == 404:
-                log.debug(f"PA 404 for folio {folio}")
                 return {}
             if r.status_code != 200:
-                log.warning(f"PA API {r.status_code} for folio {folio}")
                 self.stats["errors"] += 1
                 return {}
 
-            data = r.json()
-            if not data or isinstance(data, str):
-                log.info(f"PA empty/string response for {folio}: {str(data)[:200]}")
+            try:
+                data = r.json()
+            except Exception as je:
+                if diag:
+                    log.info(f"PA_DIAG #{self._diag_count} json parse failed: {je}")
                 return {}
 
-            # DIAGNOSTIC: dump raw JSON structure for the first folio
-            # so we can see the actual field names the API returns
-            if not hasattr(self, '_dumped_raw'):
-                self._dumped_raw = True
-                import json as _json
-                raw_str = _json.dumps(data, indent=2, default=str)
-                # Log in chunks so GitHub Actions doesn't truncate
-                log.info(f"PA RAW RESPONSE for folio {folio} (type={type(data).__name__}):")
+            if diag:
+                log.info(f"PA_DIAG #{self._diag_count} type={type(data).__name__}")
                 if isinstance(data, dict):
-                    log.info(f"PA TOP-LEVEL KEYS: {list(data.keys())}")
+                    log.info(f"PA_DIAG #{self._diag_count} keys={list(data.keys())}")
                     for k, v in data.items():
-                        v_str = str(v)[:300]
-                        log.info(f"PA KEY '{k}': {v_str}")
-                log.info(f"PA FULL JSON (first 2000 chars): {raw_str[:2000]}")
+                        log.info(f"PA_DIAG #{self._diag_count} '{k}'={str(v)[:500]}")
 
-            return self._parse_pa_json(data)
+            if not data or isinstance(data, str):
+                return {}
+
+            result = self._parse_pa_json(data)
+
+            if diag:
+                log.info(f"PA_DIAG #{self._diag_count} parsed={result}")
+
+            return result
 
         except requests.exceptions.RequestException as e:
-            log.warning(f"PA API error for {folio}: {e}")
+            if diag:
+                log.info(f"PA_DIAG #{self._diag_count} REQUEST ERROR: {e}")
             self.stats["errors"] += 1
             return {}
-        except (ValueError, KeyError) as e:
-            log.warning(f"PA parse error for {folio}: {e}")
+        except Exception as e:
+            if diag:
+                log.info(f"PA_DIAG #{self._diag_count} UNEXPECTED ERROR: {e}")
             self.stats["errors"] += 1
             return {}
 
