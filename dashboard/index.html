@@ -1,0 +1,674 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1.0"/>
+<title>Miami-Dade Motivated Seller Leads</title>
+<link rel="preconnect" href="https://fonts.googleapis.com"/>
+<link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=Syne:wght@400;500;700;800&display=swap" rel="stylesheet"/>
+<style>
+  :root {
+    --bg:       #0a0c0f;
+    --surface:  #111418;
+    --border:   #1e242c;
+    --accent:   #e8ff47;
+    --red:      #ff4d4d;
+    --orange:   #ff8c42;
+    --blue:     #4da6ff;
+    --muted:    #4a5568;
+    --text:     #d4dbe8;
+    --dim:      #6b7a8d;
+    --white:    #f0f4ff;
+    --green:    #42ff9b;
+    --radius:   4px;
+  }
+
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Syne', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    font-size: 14px;
+    line-height: 1.5;
+  }
+
+  /* ── HEADER ── */
+  header {
+    border-bottom: 1px solid var(--border);
+    padding: 18px 32px;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    position: sticky;
+    top: 0;
+    background: rgba(10,12,15,0.95);
+    backdrop-filter: blur(12px);
+    z-index: 100;
+  }
+  .logo {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .logo-icon {
+    width: 32px; height: 32px;
+    background: var(--accent);
+    border-radius: 4px;
+    display: flex; align-items: center; justify-content: center;
+    font-size: 16px;
+    font-weight: 800;
+    color: #0a0c0f;
+    font-family: 'Space Mono', monospace;
+    flex-shrink: 0;
+  }
+  .logo-text { font-size: 15px; font-weight: 700; color: var(--white); letter-spacing: 0.02em; }
+  .logo-sub  { font-size: 11px; color: var(--dim); font-family: 'Space Mono', monospace; margin-top: 1px; }
+  .header-right { display: flex; align-items: center; gap: 16px; }
+  .fetch-time { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--dim); }
+  .pulse { width: 8px; height: 8px; border-radius: 50%; background: var(--green); display: inline-block; margin-right: 6px; animation: pulse 2s infinite; }
+  @keyframes pulse { 0%,100%{opacity:1;} 50%{opacity:0.3;} }
+
+  .btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 7px 14px; border-radius: var(--radius);
+    font-family: 'Space Mono', monospace; font-size: 11px; font-weight: 700;
+    cursor: pointer; border: none; text-transform: uppercase; letter-spacing: 0.05em;
+    transition: all 0.15s;
+  }
+  .btn-accent { background: var(--accent); color: #0a0c0f; }
+  .btn-accent:hover { background: #d4eb00; transform: translateY(-1px); }
+  .btn-ghost { background: transparent; color: var(--dim); border: 1px solid var(--border); }
+  .btn-ghost:hover { border-color: var(--muted); color: var(--text); }
+
+  /* ── LAYOUT ── */
+  .container { max-width: 1600px; margin: 0 auto; padding: 0 32px; }
+
+  /* ── STATS BAR ── */
+  .stats-bar {
+    display: grid;
+    grid-template-columns: repeat(6, 1fr);
+    gap: 1px;
+    background: var(--border);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    overflow: hidden;
+    margin: 24px 0;
+  }
+  .stat-cell {
+    background: var(--surface);
+    padding: 16px 20px;
+    position: relative;
+  }
+  .stat-cell:hover { background: #15191f; }
+  .stat-label {
+    font-family: 'Space Mono', monospace;
+    font-size: 10px; color: var(--dim); text-transform: uppercase; letter-spacing: 0.1em;
+    margin-bottom: 6px;
+  }
+  .stat-value {
+    font-size: 28px; font-weight: 800; color: var(--white); line-height: 1;
+    font-family: 'Space Mono', monospace;
+  }
+  .stat-value.accent { color: var(--accent); }
+  .stat-value.red    { color: var(--red); }
+  .stat-value.orange { color: var(--orange); }
+  .stat-value.blue   { color: var(--blue); }
+  .stat-sub { font-size: 11px; color: var(--dim); margin-top: 4px; }
+
+  /* ── CONTROLS ── */
+  .controls {
+    display: flex; gap: 10px; align-items: center;
+    margin-bottom: 16px; flex-wrap: wrap;
+  }
+  .search-wrap { position: relative; flex: 1; min-width: 260px; }
+  .search-wrap input {
+    width: 100%;
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); padding: 9px 12px 9px 36px;
+    border-radius: var(--radius); font-family: 'Syne', sans-serif; font-size: 13px;
+    outline: none; transition: border-color 0.15s;
+  }
+  .search-wrap input:focus { border-color: var(--accent); }
+  .search-icon {
+    position: absolute; left: 11px; top: 50%; transform: translateY(-50%);
+    color: var(--dim); font-size: 14px; pointer-events: none;
+  }
+  select {
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--text); padding: 9px 12px; border-radius: var(--radius);
+    font-family: 'Syne', sans-serif; font-size: 13px; cursor: pointer; outline: none;
+  }
+  select:focus { border-color: var(--accent); }
+
+  /* ── TABLE ── */
+  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+  table { width: 100%; border-collapse: collapse; }
+  thead { position: sticky; top: 61px; z-index: 10; }
+  th {
+    background: #0d1014;
+    padding: 10px 14px;
+    text-align: left;
+    font-family: 'Space Mono', monospace;
+    font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em;
+    color: var(--dim); font-weight: 400; white-space: nowrap;
+    border-bottom: 1px solid var(--border);
+    cursor: pointer; user-select: none;
+  }
+  th:hover { color: var(--text); }
+  th.sort-asc::after  { content: " ▲"; color: var(--accent); }
+  th.sort-desc::after { content: " ▼"; color: var(--accent); }
+  tbody tr {
+    border-bottom: 1px solid var(--border);
+    transition: background 0.1s;
+    cursor: pointer;
+  }
+  tbody tr:hover { background: #13171c; }
+  tbody tr:last-child { border-bottom: none; }
+  td {
+    padding: 11px 14px; font-size: 13px; vertical-align: middle;
+    max-width: 220px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  }
+  td.wrap { white-space: normal; word-break: break-word; }
+  .mono { font-family: 'Space Mono', monospace; }
+
+  /* ── SCORE BADGE ── */
+  .score-badge {
+    display: inline-flex; align-items: center; justify-content: center;
+    width: 38px; height: 38px; border-radius: 50%;
+    font-family: 'Space Mono', monospace; font-size: 12px; font-weight: 700;
+    flex-shrink: 0;
+  }
+  .score-high   { background: rgba(232,255,71,0.12); color: var(--accent); border: 1.5px solid var(--accent); }
+  .score-med    { background: rgba(255,140,66,0.12); color: var(--orange); border: 1.5px solid var(--orange); }
+  .score-low    { background: rgba(255,77,77,0.12);  color: var(--red);    border: 1.5px solid var(--red); }
+
+  /* ── DOC TYPE TAG ── */
+  .doc-tag {
+    display: inline-block; padding: 2px 8px; border-radius: 3px;
+    font-family: 'Space Mono', monospace; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.05em; white-space: nowrap;
+  }
+  .tag-pre-foreclosure { background: rgba(255,77,77,0.15);   color: var(--red);    border: 1px solid rgba(255,77,77,0.3); }
+  .tag-tax-distressed  { background: rgba(255,140,66,0.15);  color: var(--orange); border: 1px solid rgba(255,140,66,0.3); }
+  .tag-judgment        { background: rgba(77,166,255,0.15);  color: var(--blue);   border: 1px solid rgba(77,166,255,0.3); }
+  .tag-tax-lien        { background: rgba(255,140,66,0.12);  color: var(--orange); border: 1px solid rgba(255,140,66,0.25); }
+  .tag-lien            { background: rgba(107,122,141,0.2);  color: var(--text);   border: 1px solid var(--border); }
+  .tag-probate         { background: rgba(146,100,255,0.15); color: #b28cff;       border: 1px solid rgba(146,100,255,0.3); }
+  .tag-notice          { background: rgba(66,255,155,0.1);   color: var(--green);  border: 1px solid rgba(66,255,155,0.25); }
+  .tag-release         { background: rgba(74,85,104,0.3);    color: var(--dim);    border: 1px solid var(--border); }
+
+  /* ── FLAG CHIPS ── */
+  .flags { display: flex; flex-wrap: wrap; gap: 4px; }
+  .flag {
+    font-size: 10px; padding: 2px 6px; border-radius: 3px;
+    border: 1px solid var(--border); color: var(--dim);
+    font-family: 'Space Mono', monospace; white-space: nowrap;
+  }
+  .flag.hot { border-color: rgba(232,255,71,0.4); color: var(--accent); background: rgba(232,255,71,0.06); }
+
+  /* ── AMOUNT ── */
+  .amount { color: var(--text); font-family: 'Space Mono', monospace; }
+  .amount.big { color: var(--orange); }
+
+  /* ── LINK ── */
+  a.clerk-link {
+    color: var(--blue); text-decoration: none; font-family: 'Space Mono', monospace;
+    font-size: 11px;
+  }
+  a.clerk-link:hover { color: var(--accent); text-decoration: underline; }
+
+  /* ── EMPTY STATE ── */
+  .empty-state {
+    text-align: center; padding: 80px 20px; color: var(--dim);
+    font-family: 'Space Mono', monospace;
+  }
+  .empty-state .big { font-size: 48px; margin-bottom: 12px; }
+
+  /* ── MODAL ── */
+  .modal-overlay {
+    position: fixed; inset: 0; background: rgba(0,0,0,0.7);
+    backdrop-filter: blur(4px); z-index: 200;
+    display: none; align-items: center; justify-content: center;
+  }
+  .modal-overlay.open { display: flex; }
+  .modal {
+    background: var(--surface); border: 1px solid var(--border);
+    border-radius: 8px; max-width: 700px; width: 95%;
+    max-height: 85vh; overflow-y: auto;
+    padding: 28px; position: relative;
+    box-shadow: 0 24px 80px rgba(0,0,0,0.6);
+  }
+  .modal-close {
+    position: absolute; top: 16px; right: 16px;
+    background: transparent; border: 1px solid var(--border); color: var(--dim);
+    width: 28px; height: 28px; border-radius: 4px; cursor: pointer; font-size: 14px;
+    display: flex; align-items: center; justify-content: center;
+  }
+  .modal-close:hover { border-color: var(--muted); color: var(--text); }
+  .modal h2 { font-size: 18px; font-weight: 800; color: var(--white); margin-bottom: 6px; }
+  .modal-sub { font-family: 'Space Mono', monospace; font-size: 11px; color: var(--dim); margin-bottom: 20px; }
+  .detail-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 16px; }
+  .detail-item label { font-family: 'Space Mono', monospace; font-size: 10px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); display: block; margin-bottom: 4px; }
+  .detail-item .val { font-size: 13px; color: var(--text); word-break: break-word; }
+  .detail-item .val.accent { color: var(--accent); font-weight: 700; }
+  .detail-section { margin-top: 20px; padding-top: 20px; border-top: 1px solid var(--border); }
+  .detail-section h3 { font-size: 12px; text-transform: uppercase; letter-spacing: 0.08em; color: var(--dim); margin-bottom: 12px; font-family: 'Space Mono', monospace; }
+
+  /* ── PAGINATION ── */
+  .pagination {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 0; font-family: 'Space Mono', monospace; font-size: 11px; color: var(--dim);
+  }
+  .page-btns { display: flex; gap: 6px; }
+  .page-btn {
+    padding: 5px 10px; border-radius: var(--radius);
+    background: var(--surface); border: 1px solid var(--border);
+    color: var(--dim); cursor: pointer; font-family: 'Space Mono', monospace; font-size: 11px;
+  }
+  .page-btn:hover { border-color: var(--muted); color: var(--text); }
+  .page-btn.active { background: var(--accent); color: #0a0c0f; border-color: var(--accent); font-weight: 700; }
+  .page-btn:disabled { opacity: 0.3; cursor: default; }
+
+  /* ── RESPONSIVE ── */
+  @media (max-width: 900px) {
+    .container { padding: 0 16px; }
+    .stats-bar { grid-template-columns: repeat(3, 1fr); }
+    header { padding: 14px 16px; }
+    .detail-grid { grid-template-columns: 1fr; }
+  }
+  @media (max-width: 600px) {
+    .stats-bar { grid-template-columns: repeat(2, 1fr); }
+    .logo-sub { display: none; }
+  }
+
+  /* scrollbar */
+  ::-webkit-scrollbar { width: 6px; height: 6px; }
+  ::-webkit-scrollbar-track { background: var(--bg); }
+  ::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+</style>
+</head>
+<body>
+
+<header>
+  <div class="logo">
+    <div class="logo-icon">MD</div>
+    <div>
+      <div class="logo-text">Motivated Seller Radar</div>
+      <div class="logo-sub">Miami-Dade County · Official Records</div>
+    </div>
+  </div>
+  <div class="header-right">
+    <span class="fetch-time" id="fetchTime"><span class="pulse"></span>Loading...</span>
+    <button class="btn btn-ghost" onclick="exportCSV()">⬇ Export CSV</button>
+    <button class="btn btn-accent" onclick="location.reload()">↻ Refresh</button>
+  </div>
+</header>
+
+<div class="container">
+  <!-- Stats -->
+  <div class="stats-bar" id="statsBar">
+    <div class="stat-cell">
+      <div class="stat-label">Total Leads</div>
+      <div class="stat-value accent" id="statTotal">—</div>
+      <div class="stat-sub" id="statRange">Loading...</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">With Address</div>
+      <div class="stat-value" id="statAddr">—</div>
+      <div class="stat-sub">Property located</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Pre-Foreclosure</div>
+      <div class="stat-value red" id="statFC">—</div>
+      <div class="stat-sub">LP + NOFC</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">Judgments / Liens</div>
+      <div class="stat-value orange" id="statLiens">—</div>
+      <div class="stat-sub">JUD + LN types</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">High Score (70+)</div>
+      <div class="stat-value blue" id="statHigh">—</div>
+      <div class="stat-sub">Priority targets</div>
+    </div>
+    <div class="stat-cell">
+      <div class="stat-label">New This Week</div>
+      <div class="stat-value accent" id="statNew">—</div>
+      <div class="stat-sub">Fresh filings</div>
+    </div>
+  </div>
+
+  <!-- Controls -->
+  <div class="controls">
+    <div class="search-wrap">
+      <span class="search-icon">⌕</span>
+      <input type="text" id="searchBox" placeholder="Search owner, address, doc number…" oninput="applyFilters()"/>
+    </div>
+    <select id="filterType" onchange="applyFilters()">
+      <option value="">All Types</option>
+      <option value="pre-foreclosure">Pre-Foreclosure</option>
+      <option value="tax-distressed">Tax Distressed</option>
+      <option value="judgment">Judgment</option>
+      <option value="tax-lien">Tax / IRS Lien</option>
+      <option value="lien">Lien</option>
+      <option value="probate">Probate</option>
+      <option value="notice">Notice</option>
+      <option value="release">Release</option>
+    </select>
+    <select id="filterScore" onchange="applyFilters()">
+      <option value="">All Scores</option>
+      <option value="70">Score 70+</option>
+      <option value="50">Score 50+</option>
+      <option value="30">Score 30+</option>
+    </select>
+    <select id="filterAddr" onchange="applyFilters()">
+      <option value="">All Records</option>
+      <option value="1">Has Address</option>
+    </select>
+    <button class="btn btn-ghost" onclick="clearFilters()">✕ Clear</button>
+  </div>
+
+  <!-- Table -->
+  <div class="table-wrap">
+    <table id="leadsTable">
+      <thead>
+        <tr>
+          <th onclick="sortBy('score')">Score</th>
+          <th onclick="sortBy('doc_type')">Doc Type</th>
+          <th onclick="sortBy('doc_num')">Doc #</th>
+          <th onclick="sortBy('filed')">Filed</th>
+          <th onclick="sortBy('owner')">Owner / Grantor</th>
+          <th onclick="sortBy('prop_address')">Property Address</th>
+          <th onclick="sortBy('amount')">Amount</th>
+          <th>Flags</th>
+          <th>Link</th>
+        </tr>
+      </thead>
+      <tbody id="tableBody">
+        <tr><td colspan="9"><div class="empty-state"><div class="big">⏳</div>Loading leads…</div></td></tr>
+      </tbody>
+    </table>
+  </div>
+
+  <div class="pagination">
+    <span id="pageInfo">—</span>
+    <div class="page-btns" id="pageBtns"></div>
+  </div>
+</div>
+
+<!-- Detail Modal -->
+<div class="modal-overlay" id="modalOverlay" onclick="closeModal(event)">
+  <div class="modal" id="modalContent">
+    <button class="modal-close" onclick="closeModal()">✕</button>
+    <div id="modalBody"></div>
+  </div>
+</div>
+
+<script>
+let allRecords = [];
+let filtered   = [];
+let sortCol    = 'score';
+let sortDir    = -1; // -1 = desc
+let page       = 1;
+const PER_PAGE = 50;
+
+// ── LOAD DATA ──
+async function loadData() {
+  try {
+    const r = await fetch('records.json?_=' + Date.now());
+    if (!r.ok) throw new Error('HTTP ' + r.status);
+    const d = await r.json();
+
+    allRecords = d.records || [];
+    document.getElementById('fetchTime').innerHTML =
+      '<span class="pulse"></span>' + new Date(d.fetched_at).toLocaleString();
+
+    // Stats
+    const fc    = allRecords.filter(r => r.cat === 'pre-foreclosure').length;
+    const liens = allRecords.filter(r => ['judgment','tax-lien','lien'].includes(r.cat)).length;
+    const high  = allRecords.filter(r => r.score >= 70).length;
+    const nw    = allRecords.filter(r => (r.flags||[]).includes('New this week')).length;
+    const dfrom = d.date_range?.from || '';
+    const dto   = d.date_range?.to   || '';
+
+    document.getElementById('statTotal').textContent = d.total || 0;
+    document.getElementById('statAddr').textContent  = d.with_address || 0;
+    document.getElementById('statFC').textContent    = fc;
+    document.getElementById('statLiens').textContent = liens;
+    document.getElementById('statHigh').textContent  = high;
+    document.getElementById('statNew').textContent   = nw;
+    document.getElementById('statRange').textContent = dfrom + ' – ' + dto;
+
+    applyFilters();
+  } catch(e) {
+    console.error(e);
+    document.getElementById('tableBody').innerHTML =
+      '<tr><td colspan="9"><div class="empty-state"><div class="big">⚠</div>Could not load records.json<br><small>' + e.message + '</small></div></td></tr>';
+    document.getElementById('fetchTime').textContent = 'Error loading data';
+  }
+}
+
+// ── FILTERS ──
+function applyFilters() {
+  const q     = document.getElementById('searchBox').value.trim().toLowerCase();
+  const type  = document.getElementById('filterType').value;
+  const minSc = parseInt(document.getElementById('filterScore').value) || 0;
+  const addrF = document.getElementById('filterAddr').value;
+
+  filtered = allRecords.filter(r => {
+    if (type  && r.cat !== type) return false;
+    if (minSc && r.score < minSc) return false;
+    if (addrF && !r.prop_address) return false;
+    if (q) {
+      const haystack = [r.owner, r.doc_num, r.prop_address, r.doc_type, r.grantee, r.legal]
+        .join(' ').toLowerCase();
+      if (!haystack.includes(q)) return false;
+    }
+    return true;
+  });
+
+  sortData();
+  page = 1;
+  render();
+}
+
+function clearFilters() {
+  document.getElementById('searchBox').value = '';
+  document.getElementById('filterType').value = '';
+  document.getElementById('filterScore').value = '';
+  document.getElementById('filterAddr').value = '';
+  applyFilters();
+}
+
+// ── SORT ──
+let _lastSort = '';
+function sortBy(col) {
+  if (sortCol === col) sortDir *= -1;
+  else { sortCol = col; sortDir = col === 'score' ? -1 : 1; }
+  document.querySelectorAll('th').forEach(th => th.classList.remove('sort-asc','sort-desc'));
+  const ths = document.querySelectorAll('th');
+  const cols = ['score','doc_type','doc_num','filed','owner','prop_address','amount','_flags','_link'];
+  const idx  = cols.indexOf(col);
+  if (idx >= 0) ths[idx].classList.add(sortDir === 1 ? 'sort-asc' : 'sort-desc');
+  sortData();
+  render();
+}
+
+function sortData() {
+  filtered.sort((a,b) => {
+    let av = a[sortCol], bv = b[sortCol];
+    if (sortCol === 'amount') { av = parseFloat(av)||0; bv = parseFloat(bv)||0; }
+    else if (typeof av === 'string') { av = av.toLowerCase(); bv = (bv||'').toLowerCase(); }
+    else { av = av||0; bv = bv||0; }
+    if (av < bv) return -sortDir;
+    if (av > bv) return  sortDir;
+    return 0;
+  });
+}
+
+// ── RENDER TABLE ──
+function render() {
+  const total = filtered.length;
+  const pages = Math.max(1, Math.ceil(total / PER_PAGE));
+  page = Math.min(page, pages);
+  const start = (page - 1) * PER_PAGE;
+  const slice = filtered.slice(start, start + PER_PAGE);
+
+  document.getElementById('pageInfo').textContent =
+    `Showing ${start+1}–${Math.min(start+PER_PAGE, total)} of ${total} records`;
+
+  const tbody = document.getElementById('tableBody');
+  if (!slice.length) {
+    tbody.innerHTML = '<tr><td colspan="9"><div class="empty-state"><div class="big">🔍</div>No records match your filters</div></td></tr>';
+    renderPagination(0, 1);
+    return;
+  }
+
+  tbody.innerHTML = slice.map((r, i) => {
+    const scoreClass = r.score >= 70 ? 'score-high' : r.score >= 50 ? 'score-med' : 'score-low';
+    const tagClass   = 'tag-' + (r.cat || 'lien');
+    const amtDisplay = r.amount ? (r.amount > 100000 ? '<span class="amount big">$' + fmtNum(r.amount) + '</span>' : '<span class="amount">$' + fmtNum(r.amount) + '</span>') : '<span style="color:var(--border)">—</span>';
+    const hotFlags   = ['Lis pendens','Pre-foreclosure'];
+    const flagsHtml  = (r.flags||[]).slice(0,3).map(f =>
+      '<span class="flag' + (hotFlags.includes(f)?' hot':'') + '">' + esc(f) + '</span>'
+    ).join('');
+    const addr = r.prop_address ? esc(r.prop_address) + (r.prop_city ? ', ' + esc(r.prop_city) : '') : '<span style="color:var(--border)">—</span>';
+
+    return `<tr onclick="showDetail(${start+i})">
+      <td><div class="score-badge ${scoreClass}">${r.score}</div></td>
+      <td><span class="doc-tag ${tagClass}">${esc(r.doc_type)}</span></td>
+      <td class="mono" style="color:var(--dim);font-size:11px">${esc(r.doc_num)}</td>
+      <td class="mono" style="font-size:12px">${esc(r.filed||'')}</td>
+      <td style="font-weight:500;color:var(--white)">${esc(r.owner||'Unknown')}</td>
+      <td style="font-size:12px">${addr}</td>
+      <td>${amtDisplay}</td>
+      <td><div class="flags">${flagsHtml}</div></td>
+      <td onclick="event.stopPropagation()">
+        ${r.clerk_url ? '<a class="clerk-link" href="' + esc(r.clerk_url) + '" target="_blank" rel="noopener">View ↗</a>' : '—'}
+      </td>
+    </tr>`;
+  }).join('');
+
+  renderPagination(total, pages);
+}
+
+function renderPagination(total, pages) {
+  const container = document.getElementById('pageBtns');
+  if (pages <= 1) { container.innerHTML = ''; return; }
+  let html = '';
+  html += `<button class="page-btn" onclick="goPage(${page-1})" ${page<=1?'disabled':''}>‹</button>`;
+  for (let p = 1; p <= Math.min(pages, 7); p++) {
+    html += `<button class="page-btn${p===page?' active':''}" onclick="goPage(${p})">${p}</button>`;
+  }
+  if (pages > 7) html += `<span style="color:var(--dim);padding:0 4px">…</span><button class="page-btn${pages===page?' active':''}" onclick="goPage(${pages})">${pages}</button>`;
+  html += `<button class="page-btn" onclick="goPage(${page+1})" ${page>=pages?'disabled':''}>›</button>`;
+  container.innerHTML = html;
+}
+
+function goPage(p) { page = p; render(); window.scrollTo(0,0); }
+
+// ── DETAIL MODAL ──
+function showDetail(idx) {
+  const r = filtered[idx];
+  if (!r) return;
+  const scoreClass = r.score >= 70 ? 'score-high' : r.score >= 50 ? 'score-med' : 'score-low';
+  const tagClass   = 'tag-' + (r.cat || 'lien');
+  const docName    = docTypeNames[r.doc_type] || r.doc_type;
+
+  document.getElementById('modalBody').innerHTML = `
+    <div style="display:flex;align-items:center;gap:12px;margin-bottom:4px">
+      <div class="score-badge ${scoreClass}" style="width:48px;height:48px;font-size:16px">${r.score}</div>
+      <div>
+        <h2>${esc(r.owner||'Unknown Owner')}</h2>
+        <div class="modal-sub">${esc(r.doc_num)} · <span class="doc-tag ${tagClass}">${esc(r.doc_type)}</span> · ${esc(r.filed||'')}</div>
+      </div>
+    </div>
+
+    <div class="flags" style="margin-bottom:20px">
+      ${(r.flags||[]).map(f => '<span class="flag hot">'+esc(f)+'</span>').join('')}
+    </div>
+
+    <div class="detail-section">
+      <h3>Document Info</h3>
+      <div class="detail-grid">
+        <div class="detail-item"><label>Document Type</label><div class="val">${esc(docName)}</div></div>
+        <div class="detail-item"><label>Category</label><div class="val">${esc(r.cat_label||r.cat)}</div></div>
+        <div class="detail-item"><label>Document Number</label><div class="val mono">${esc(r.doc_num)}</div></div>
+        <div class="detail-item"><label>Date Filed</label><div class="val">${esc(r.filed||'—')}</div></div>
+        <div class="detail-item"><label>Amount / Debt</label><div class="val accent">${r.amount ? '$' + fmtNum(r.amount) : '—'}</div></div>
+        <div class="detail-item"><label>Grantee</label><div class="val">${esc(r.grantee||'—')}</div></div>
+        <div class="detail-item" style="grid-column:1/-1"><label>Legal Description</label><div class="val">${esc(r.legal||'—')}</div></div>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <h3>Property Address</h3>
+      <div class="detail-grid">
+        <div class="detail-item"><label>Street</label><div class="val accent">${esc(r.prop_address||'—')}</div></div>
+        <div class="detail-item"><label>City / State / Zip</label><div class="val">${[r.prop_city,r.prop_state,r.prop_zip].filter(Boolean).join(', ')||'—'}</div></div>
+      </div>
+    </div>
+
+    <div class="detail-section">
+      <h3>Mailing Address</h3>
+      <div class="detail-grid">
+        <div class="detail-item"><label>Street</label><div class="val">${esc(r.mail_address||'—')}</div></div>
+        <div class="detail-item"><label>City / State / Zip</label><div class="val">${[r.mail_city,r.mail_state,r.mail_zip].filter(Boolean).join(', ')||'—'}</div></div>
+      </div>
+    </div>
+
+    ${r.clerk_url ? `<div class="detail-section"><a class="btn btn-accent" href="${esc(r.clerk_url)}" target="_blank" rel="noopener" style="text-decoration:none">View Official Record ↗</a></div>` : ''}
+  `;
+  document.getElementById('modalOverlay').classList.add('open');
+}
+
+function closeModal(e) {
+  if (!e || e.target === document.getElementById('modalOverlay')) {
+    document.getElementById('modalOverlay').classList.remove('open');
+  }
+}
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModal(); });
+
+// ── CSV EXPORT ──
+function exportCSV() {
+  const cols = ['score','doc_type','doc_num','filed','owner','grantee','prop_address','prop_city','prop_state','prop_zip','mail_address','mail_city','mail_state','mail_zip','amount','flags','clerk_url','cat_label','legal'];
+  const rows = [cols.join(',')];
+  filtered.forEach(r => {
+    rows.push(cols.map(c => {
+      let v = c === 'flags' ? (r.flags||[]).join(' | ') : (r[c]??'');
+      v = String(v).replace(/"/g,'""');
+      return '"' + v + '"';
+    }).join(','));
+  });
+  const blob = new Blob([rows.join('\n')], {type:'text/csv'});
+  const a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'miami_leads_' + new Date().toISOString().slice(0,10) + '.csv';
+  a.click();
+}
+
+// ── UTILS ──
+function esc(s) {
+  if (!s && s !== 0) return '';
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}
+function fmtNum(n) {
+  return Number(n).toLocaleString('en-US', {minimumFractionDigits:0, maximumFractionDigits:0});
+}
+const docTypeNames = {
+  LP:'Lis Pendens', NOFC:'Notice of Foreclosure', TAXDEED:'Tax Deed',
+  JUD:'Judgment', CCJ:'Certified Judgment', DRJUD:'Domestic Judgment',
+  LNCORPTX:'Corp Tax Lien', LNIRS:'IRS Lien', LNFED:'Federal Lien',
+  LN:'Lien', LNMECH:'Mechanic Lien', LNHOA:'HOA Lien',
+  MEDLN:'Medicaid Lien', PRO:'Probate Document', NOC:'Notice of Commencement',
+  RELLP:'Release of Lis Pendens'
+};
+
+// init
+loadData();
+</script>
+</body>
+</html>
