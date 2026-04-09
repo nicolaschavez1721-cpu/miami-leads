@@ -233,6 +233,8 @@ class PALookup:
         self.cache[cache_key] = result
         time.sleep(self.RATE_LIMIT_DELAY)
         return result
+
+    def _query_arcgis(self, folio: str) -> dict:
         """Query the ArcGIS PaGis layer by folio number."""
         params = {
             "where": f"FOLIO='{folio}'",
@@ -804,4 +806,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-    
