@@ -276,15 +276,15 @@ class ClerkAPIScraper:
         portal_name = PORTAL_DOC_NAMES.get(doc_code, doc_code)
 
         # Match exactly what the browser sends - empty dates, doc type only
-        # Portal uses YYYY-MM-DD format and reversed dates (From=newest, To=oldest)
-        date_from_ymd = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
-        date_to_ymd   = datetime.now().strftime("%Y-%m-%d")
+        # Date format: YYYY-MM-DD, From=oldest, To=newest
+        date_from = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+        date_to   = datetime.now().strftime("%Y-%m-%d")
 
         search_url = (
             f"{API_BASE}/home/standardsearch"
             f"?partyName="
-            f"&dateRangeFrom={date_to_ymd}"
-            f"&dateRangeTo={date_from_ymd}"
+            f"&dateRangeFrom={date_from}"
+            f"&dateRangeTo={date_to}"
             f"&documentType={urllib.parse.quote(portal_name)}"
             f"&searchT={urllib.parse.quote(portal_name)}"
             f"&firstQuery=y"
@@ -407,17 +407,16 @@ class ClerkAPIScraper:
                             except Exception:
                                 pass
 
-                    # DATE FILTER - skip records outside our lookback window
-                    if filed:
-                        try:
-                            rec_dt = datetime.strptime(filed, "%Y-%m-%d")
-                            cutoff_dt = datetime.now() - timedelta(days=lookback_days)
-                            if rec_dt < cutoff_dt:
-                                continue  # skip old records
-                        except Exception:
-                            pass
-                    else:
-                        continue  # skip records with no date
+                    # DATE FILTER - only keep records from last N days
+                    if not filed:
+                        continue
+                    try:
+                        rec_dt = datetime.strptime(filed, "%Y-%m-%d")
+                        cutoff_dt = datetime.now() - timedelta(days=lookback_days)
+                        if rec_dt < cutoff_dt:
+                            continue
+                    except Exception:
+                        continue
 
                     amount = None
                     raw_amt = item.get("consideratioN_1") or item.get("consideratioN_2")
