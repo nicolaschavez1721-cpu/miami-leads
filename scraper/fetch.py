@@ -1,6 +1,6 @@
 """
 Miami-Dade County Motivated Seller Lead Scraper
-Uses the internal API that powers the official records portal.
+Uses Playwright with stealth mode to execute JavaScript in the portal.
 """
 
 import asyncio
@@ -10,21 +10,19 @@ import io
 import re
 import time
 import logging
-import zipfile
-import struct
+import random
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Optional
 
-import requests
-from bs4 import BeautifulSoup
+from playwright.async_api import async_playwright, TimeoutError as PlaywrightTimeout
 
 # ─────────────────────────────────────────────
 # CONFIG
 # ─────────────────────────────────────────────
 LOOKBACK_DAYS = 7
 MAX_RETRIES   = 3
-RETRY_DELAY   = 3
+RETRY_DELAY   = 5
 
 ROOT_DIR      = Path(__file__).parent.parent
 DASHBOARD_DIR = ROOT_DIR / "dashboard"
@@ -79,7 +77,6 @@ CAT_LABELS = {
 def compute_score_and_flags(record: dict) -> tuple:
     flags = []
     score = 30
-
     doc_type = record.get("doc_type", "")
     cat      = record.get("cat", "")
     amount   = record.get("amount") or 0
@@ -100,7 +97,6 @@ def compute_score_and_flags(record: dict) -> tuple:
         flags.append("Probate / estate")
     if re.search(r"\bLLC\b|\bCORP\b|\bINC\b|\bLTD\b|\bLLP\b", owner, re.I):
         flags.append("LLC / corp owner")
-
     try:
         filed_dt = datetime.strptime(filed, "%Y-%m-%d")
         if (datetime.now() - filed_dt).days <= 7:
@@ -124,242 +120,270 @@ def compute_score_and_flags(record: dict) -> tuple:
 
 
 # ─────────────────────────────────────────────
-# CLERK SCRAPER - Direct HTTP approach
+# STEALTH JS — injected to avoid bot detection
+# ─────────────────────────────────────────────
+STEALTH_JS = """
+// Override navigator properties to appear as real browser
+Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+Object.defineProperty(navigator, 'plugins', { get: () => [1,2,3,4,5] });
+Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'] });
+Object.defineProperty(navigator, 'platform', { get: () => 'MacIntel' });
+Object.defineProperty(navigator, 'hardwareConcurrency', { get: () => 8 });
+Object.defineProperty(navigator, 'deviceMemory', { get: () => 8 });
+window.chrome = { runtime: {} };
+Object.defineProperty(navigator, 'permissions', {
+  get: () => ({
+    query: () => Promise.resolve({ state: 'granted' })
+  })
+});
+// Fix iframe contentWindow
+const originalQuery = window.navigator.permissions.query;
+window.navigator.permissions.query = (parameters) => (
+  parameters.name === 'notifications' ?
+    Promise.resolve({ state: Notification.permission }) :
+    originalQuery(parameters)
+);
+"""
+
+
+# ─────────────────────────────────────────────
+# CLERK SCRAPER
 # ─────────────────────────────────────────────
 class ClerkScraper:
-    # The internal API endpoint the new portal uses
-    API_BASE = "https://onlineservices.miamidadeclerk.gov/officialrecords"
-
-    # Headers that mimic a real browser session
-    HEADERS = {
-        "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-        "Accept": "application/json, text/plain, */*",
-        "Accept-Language": "en-US,en;q=0.9",
-        "Referer": "https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx",
-        "Origin": "https://onlineservices.miamidadeclerk.gov",
-    }
+    PORTAL_URL = "https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx"
 
     def __init__(self, lookback_days: int = 7):
         self.lookback_days = lookback_days
         self.date_from = (datetime.now() - timedelta(days=lookback_days)).strftime("%m/%d/%Y")
         self.date_to   = datetime.now().strftime("%m/%d/%Y")
-        self.session   = requests.Session()
-        self.session.headers.update(self.HEADERS)
 
-    def _init_session(self):
-        """Load the portal page to get cookies/tokens."""
-        try:
-            r = self.session.get(
-                f"{self.API_BASE}/StandardSearch.aspx",
-                timeout=30,
-                allow_redirects=True
-            )
-            log.info(f"Portal init: HTTP {r.status_code}, URL: {r.url}")
-            # Also try the main page
-            self.session.get(f"{self.API_BASE}/", timeout=15, allow_redirects=True)
-        except Exception as e:
-            log.warning(f"Session init warning: {e}")
+    async def _human_type(self, page, selector, text):
+        """Type like a human with random delays."""
+        await page.click(selector)
+        await page.fill(selector, "")
+        for ch in text:
+            await page.type(selector, ch, delay=random.randint(50, 150))
 
-    def _try_api_search(self, doc_code: str) -> list[dict]:
-        """Try hitting the internal API endpoints that the JS app calls."""
-        doc_label, cat = DOC_TYPES.get(doc_code, (doc_code, "other"))
-        records = []
+    async def _wait_and_log(self, page, label):
+        """Wait for page to settle and log current state."""
+        await asyncio.sleep(random.uniform(1.5, 3.0))
+        url = page.url
+        html = await page.content()
+        text = await page.evaluate("() => document.body ? document.body.innerText.slice(0, 300) : ''")
+        inputs = await page.evaluate("""() => {
+            const els = document.querySelectorAll('input, select, button');
+            return Array.from(els).slice(0, 15).map(e => ({
+                tag: e.tagName, id: e.id, name: e.name,
+                type: e.type, placeholder: e.placeholder, value: e.value.slice(0,30)
+            }));
+        }""")
+        log.info(f"[{label}] URL: {url}")
+        log.info(f"[{label}] Page text: {text[:200].replace(chr(10),' ')}")
+        log.info(f"[{label}] Inputs: {inputs}")
+        return html, inputs
 
-        # Common internal API patterns for clerk portals
-        api_endpoints = [
-            f"{self.API_BASE}/api/search",
-            f"{self.API_BASE}/api/OfficialRecords/search",
-            f"{self.API_BASE}/Search/Results",
-            "https://www2.miamidadeclerk.gov/api/OfficialRecords",
+    async def _try_fill_form(self, page, doc_code: str) -> bool:
+        """Try all known approaches to fill the search form."""
+
+        # Approach 1: Find inputs by various strategies
+        strategies = [
+            # By placeholder text
+            ("placeholder~=date", "date"),
+            # By aria-label
+            ("aria-label~=date", "date"),
+            # By data attributes
+            ("[data-field*=date]", "date"),
+            # By common ID patterns
+            ("#startDate,#start-date,#dateFrom,#date-from,#fromDate,#beginDate,#recordedDateFrom", "date_start"),
+            ("#endDate,#end-date,#dateTo,#date-to,#toDate,#throughDate,#recordedDateTo", "date_end"),
+            ("#docType,#doc-type,#documentType,#instrumentType,#recordType", "doctype"),
         ]
 
-        payload = {
-            "docType": doc_code,
-            "dateFrom": self.date_from,
-            "dateTo": self.date_to,
-            "recordedDateFrom": self.date_from,
-            "recordedDateTo": self.date_to,
-        }
+        # Try to find all form elements via JS
+        form_info = await page.evaluate("""() => {
+            const result = {inputs: [], selects: [], buttons: []};
+            document.querySelectorAll('input').forEach(el => {
+                result.inputs.push({
+                    id: el.id, name: el.name, type: el.type,
+                    placeholder: el.placeholder, className: el.className.slice(0,50),
+                    'aria-label': el.getAttribute('aria-label') || '',
+                    'data-bind': el.getAttribute('data-bind') || '',
+                    visible: el.offsetParent !== null
+                });
+            });
+            document.querySelectorAll('select').forEach(el => {
+                const opts = Array.from(el.options).map(o => o.value + ':' + o.text).slice(0,10);
+                result.selects.push({id: el.id, name: el.name, options: opts});
+            });
+            document.querySelectorAll('button, input[type=submit]').forEach(el => {
+                result.buttons.push({id: el.id, text: el.innerText || el.value, type: el.type});
+            });
+            return result;
+        }""")
 
-        for endpoint in api_endpoints:
+        log.info(f"Form elements found: inputs={len(form_info['inputs'])}, selects={len(form_info['selects'])}, buttons={len(form_info['buttons'])}")
+        log.info(f"Inputs detail: {form_info['inputs']}")
+        log.info(f"Selects detail: {form_info['selects']}")
+        log.info(f"Buttons: {form_info['buttons']}")
+
+        if not form_info['inputs'] and not form_info['selects']:
+            return False
+
+        # Try to fill date fields
+        filled_start = False
+        filled_end   = False
+        filled_type  = False
+
+        for inp in form_info['inputs']:
+            iid   = (inp.get('id') or '').lower()
+            iname = (inp.get('name') or '').lower()
+            iph   = (inp.get('placeholder') or '').lower()
+            ibind = (inp.get('data-bind') or '').lower()
+            iaria = (inp.get('aria-label') or '').lower()
+            combined = iid + iname + iph + ibind + iaria
+
+            sel = None
+            if inp.get('id'):
+                sel = f"#{inp['id']}"
+            elif inp.get('name'):
+                sel = f"input[name='{inp['name']}']"
+
+            if not sel:
+                continue
+
+            is_start = any(x in combined for x in ['startdate','start_date','datefrom','date_from','begindate','fromdate','recordedstart','datebegin'])
+            is_end   = any(x in combined for x in ['enddate','end_date','dateto','date_to','throughdate','todate','recordedend','dateend'])
+            is_type  = any(x in combined for x in ['doctype','doc_type','documenttype','instrumenttype','recordtype'])
+
             try:
-                r = self.session.post(endpoint, json=payload, timeout=20)
-                if r.status_code == 200 and r.text.strip().startswith("{"):
-                    data = r.json()
-                    log.info(f"API hit! {endpoint}: {str(data)[:200]}")
-                    # Parse response
-                    items = data.get("records", data.get("results", data.get("data", [])))
-                    if isinstance(items, list):
-                        for item in items:
-                            records.append(self._api_item_to_record(item, doc_code, cat, doc_label))
-                        return records
-            except Exception:
-                pass
+                if is_start and not filled_start:
+                    await page.fill(sel, self.date_from)
+                    filled_start = True
+                    log.info(f"Filled start date: {sel} = {self.date_from}")
+                elif is_end and not filled_end:
+                    await page.fill(sel, self.date_to)
+                    filled_end = True
+                    log.info(f"Filled end date: {sel} = {self.date_to}")
+                elif is_type and not filled_type:
+                    await page.fill(sel, doc_code)
+                    filled_type = True
+                    log.info(f"Filled doc type: {sel} = {doc_code}")
+            except Exception as e:
+                log.debug(f"Fill error {sel}: {e}")
 
-        return records
-
-    def _api_item_to_record(self, item: dict, doc_code: str, cat: str, doc_label: str) -> dict:
-        def g(*keys):
-            for k in keys:
-                v = item.get(k, "")
-                if v:
-                    return str(v).strip()
-            return ""
-
-        filed = g("REC_DATE", "recordedDate", "filedDate", "filed")
-        try:
-            filed = datetime.fromisoformat(filed.replace("Z", "+00:00")).strftime("%Y-%m-%d")
-        except Exception:
-            for fmt in ("%m/%d/%Y", "%Y-%m-%d"):
+        # Try selects for doc type
+        for sel_el in form_info['selects']:
+            sid = (sel_el.get('id') or sel_el.get('name') or '').lower()
+            if any(x in sid for x in ['doctype','doc_type','documenttype','instrumenttype']):
+                sel_selector = f"#{sel_el['id']}" if sel_el.get('id') else f"select[name='{sel_el['name']}']"
                 try:
-                    filed = datetime.strptime(filed[:10], fmt).strftime("%Y-%m-%d")
+                    await page.select_option(sel_selector, value=doc_code)
+                    filled_type = True
+                    log.info(f"Selected doc type: {sel_selector} = {doc_code}")
+                except Exception:
+                    try:
+                        await page.select_option(sel_selector, label=doc_code)
+                        filled_type = True
+                    except Exception as e:
+                        log.debug(f"Select error: {e}")
+
+        log.info(f"Fill results: start={filled_start}, end={filled_end}, type={filled_type}")
+
+        # Submit form
+        submitted = False
+        for btn in form_info['buttons']:
+            btn_text = (btn.get('text') or '').lower()
+            btn_id   = (btn.get('id') or '').lower()
+            if any(x in btn_text + btn_id for x in ['search', 'find', 'submit', 'go']):
+                try:
+                    if btn.get('id'):
+                        await page.click(f"#{btn['id']}")
+                    else:
+                        await page.get_by_text(btn.get('text', ''), exact=False).first.click()
+                    submitted = True
+                    log.info(f"Clicked submit: {btn}")
                     break
+                except Exception as e:
+                    log.debug(f"Submit click error: {e}")
+
+        if not submitted:
+            for sel in ["input[type='submit']", "button[type='submit']", "button:has-text('Search')"]:
+                try:
+                    el = await page.query_selector(sel)
+                    if el:
+                        await el.click()
+                        submitted = True
+                        log.info(f"Submitted via fallback: {sel}")
+                        break
                 except Exception:
                     pass
 
-        amount = None
-        raw_amt = g("CONSIDERATION", "amount", "consideration")
-        if raw_amt:
-            try:
-                amount = float(re.sub(r"[^\d.]", "", raw_amt))
-            except Exception:
-                pass
+        if not submitted:
+            log.warning("No submit button found — pressing Enter")
+            await page.keyboard.press("Enter")
 
-        doc_num = g("CFN_SEQ", "CFN_MASTER_ID", "docNumber", "instrumentNumber")
-        cfn_year = g("CFN_YEAR", "year")
-        if cfn_year and doc_num:
-            doc_num = f"{cfn_year}-{doc_num}"
+        return filled_start or filled_end
 
-        clerk_url = f"https://www2.miamidadeclerk.gov/ocs/ViewDocument.aspx?cfn={doc_num}"
-
-        return {
-            "doc_num":   doc_num,
-            "doc_type":  doc_code,
-            "filed":     filed,
-            "cat":       cat,
-            "cat_label": CAT_LABELS.get(cat, cat),
-            "owner":     g("FIRST_PARTY", "grantor", "owner"),
-            "grantee":   g("SECOND_PARTY", "grantee"),
-            "amount":    amount,
-            "legal":     g("LEGAL_DESC", "legalDescription", "legal"),
-            "prop_address": "",
-            "prop_city":    "",
-            "prop_state":   "FL",
-            "prop_zip":     "",
-            "mail_address": "",
-            "mail_city":    "",
-            "mail_state":   "",
-            "mail_zip":     "",
-            "clerk_url":    clerk_url,
-            "flags":        [],
-            "score":        0,
-        }
-
-    def _scrape_html_search(self, doc_code: str) -> list[dict]:
-        """Scrape the old-style HTML search pages as fallback."""
-        doc_label, cat = DOC_TYPES.get(doc_code, (doc_code, "other"))
+    async def _parse_results(self, page, doc_code: str, cat: str, doc_label: str) -> list[dict]:
+        """Extract records from the results page using JS execution."""
         records = []
 
-        # Try the old ASP.NET form-based portal
-        old_urls = [
-            "https://www2.miamidadeclerk.gov/ocs/Search.aspx",
-            "https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx",
-        ]
+        # Wait for results to load
+        await asyncio.sleep(3)
 
-        for base_url in old_urls:
+        # Try to extract table data via JS
+        table_data = await page.evaluate("""() => {
+            const results = [];
+            // Try various table selectors
+            const tables = document.querySelectorAll('table, [class*=result], [class*=grid], [class*=record]');
+            tables.forEach(table => {
+                const rows = table.querySelectorAll('tr');
+                if (rows.length < 2) return;
+                const headers = Array.from(rows[0].querySelectorAll('th,td')).map(c => c.innerText.trim().toLowerCase());
+                for (let i = 1; i < rows.length; i++) {
+                    const cells = Array.from(rows[i].querySelectorAll('td'));
+                    if (cells.length < 2) continue;
+                    const row = {_headers: headers};
+                    cells.forEach((c, idx) => {
+                        row['col_' + idx] = c.innerText.trim();
+                        const link = c.querySelector('a');
+                        if (link) row['link_' + idx] = link.href;
+                    });
+                    results.push(row);
+                }
+            });
+            return results;
+        }""")
+
+        log.info(f"Table rows found: {len(table_data)}")
+
+        for row in table_data:
             try:
-                # GET first to grab viewstate
-                r = self.session.get(base_url, timeout=20)
-                if r.status_code != 200:
-                    continue
+                headers = row.get('_headers', [])
 
-                soup = BeautifulSoup(r.text, "lxml")
-                vs   = soup.find("input", {"id": "__VIEWSTATE"})
-                evv  = soup.find("input", {"id": "__EVENTVALIDATION"})
-                vsg  = soup.find("input", {"id": "__VIEWSTATEGENERATOR"})
-
-                # Find form field names
-                inputs = {i.get("name", ""): i.get("value", "") for i in soup.find_all("input") if i.get("name")}
-                log.info(f"Form fields at {base_url}: {list(inputs.keys())[:15]}")
-
-                if not vs and not inputs:
-                    log.info(f"No form at {base_url}")
-                    continue
-
-                # Build POST data
-                post_data = dict(inputs)
-                if vs:
-                    post_data["__VIEWSTATE"] = vs["value"]
-                if evv:
-                    post_data["__EVENTVALIDATION"] = evv["value"]
-                if vsg:
-                    post_data["__VIEWSTATEGENERATOR"] = vsg["value"]
-
-                # Try to find the right field names
-                for k in list(post_data.keys()):
-                    kl = k.lower()
-                    if "startdate" in kl or "datefrom" in kl or "begindate" in kl:
-                        post_data[k] = self.date_from
-                    elif "enddate" in kl or "dateto" in kl or "throughdate" in kl:
-                        post_data[k] = self.date_to
-                    elif "doctype" in kl or "instrumenttype" in kl:
-                        post_data[k] = doc_code
-
-                # Submit
-                self.session.headers.update({"Content-Type": "application/x-www-form-urlencoded"})
-                r2 = self.session.post(base_url, data=post_data, timeout=30)
-                soup2 = BeautifulSoup(r2.text, "lxml")
-
-                rows = self._parse_results_table(soup2, doc_code, cat, doc_label, base_url)
-                if rows:
-                    log.info(f"Got {len(rows)} records from {base_url}")
-                    records.extend(rows)
-                    return records
-
-            except Exception as e:
-                log.warning(f"HTML scrape error at {base_url}: {e}")
-
-        return records
-
-    def _parse_results_table(self, soup, doc_code, cat, doc_label, base_url):
-        records = []
-        tables = soup.find_all("table")
-        table = None
-        for t in tables:
-            rows = t.find_all("tr")
-            if len(rows) > 1:
-                table = t
-                break
-        if not table:
-            return records
-
-        headers = []
-        header_row = table.find("tr")
-        if header_row:
-            headers = [th.get_text(strip=True).lower() for th in header_row.find_all(["th", "td"])]
-
-        for row in table.find_all("tr")[1:]:
-            try:
-                cells = row.find_all("td")
-                if not cells or len(cells) < 3:
-                    continue
-
-                def cell(i):
-                    return cells[i].get_text(strip=True) if i < len(cells) else ""
-
-                def hcell(frag):
+                def hcol(frag):
                     for i, h in enumerate(headers):
                         if frag in h:
-                            return cell(i)
-                    return ""
+                            return row.get(f'col_{i}', '')
+                    return ''
 
-                doc_num  = hcell("doc") or hcell("instrument") or hcell("cfn") or cell(0)
-                filed    = hcell("date") or hcell("record") or cell(1)
-                grantor  = hcell("grantor") or hcell("owner") or hcell("name") or cell(2)
-                grantee  = hcell("grantee") or cell(3)
-                legal    = hcell("legal") or cell(4)
-                amount_s = hcell("amount") or hcell("consider") or cell(5)
+                def col(i):
+                    return row.get(f'col_{i}', '')
 
+                def link(i):
+                    return row.get(f'link_{i}', '')
+
+                doc_num  = hcol('cfn') or hcol('doc') or hcol('instrument') or col(0)
+                filed    = hcol('date') or hcol('record') or col(1)
+                grantor  = hcol('grantor') or hcol('owner') or hcol('party') or col(2)
+                grantee  = hcol('grantee') or col(3)
+                legal    = hcol('legal') or col(4)
+                amount_s = hcol('amount') or hcol('consider') or col(5)
+
+                if not doc_num or len(doc_num) < 2:
+                    continue
+
+                # Parse date
                 filed_clean = ""
                 for fmt in ("%m/%d/%Y", "%Y-%m-%d", "%m-%d-%Y", "%m/%d/%y"):
                     try:
@@ -367,9 +391,8 @@ class ClerkScraper:
                         break
                     except Exception:
                         pass
-                if not filed_clean:
-                    filed_clean = filed
 
+                # Parse amount
                 amount = None
                 if amount_s:
                     try:
@@ -377,26 +400,26 @@ class ClerkScraper:
                     except Exception:
                         pass
 
-                link_tag = row.find("a", href=True)
-                if link_tag:
-                    href = link_tag["href"]
-                    clerk_url = href if href.startswith("http") else f"https://www2.miamidadeclerk.gov{href}"
-                else:
-                    clerk_url = f"https://www2.miamidadeclerk.gov/ocs/Search.aspx"
-
-                if not doc_num:
-                    continue
+                # Find clerk URL
+                clerk_url = ""
+                for i in range(10):
+                    lnk = link(i)
+                    if lnk and 'miamidadeclerk' in lnk:
+                        clerk_url = lnk
+                        break
+                if not clerk_url:
+                    clerk_url = f"https://www2.miamidadeclerk.gov/ocs/Search.aspx?doctype={doc_code}"
 
                 records.append({
-                    "doc_num":   doc_num.strip(),
-                    "doc_type":  doc_code,
-                    "filed":     filed_clean,
-                    "cat":       cat,
-                    "cat_label": CAT_LABELS.get(cat, cat),
-                    "owner":     grantor.strip(),
-                    "grantee":   grantee.strip(),
-                    "amount":    amount,
-                    "legal":     legal.strip(),
+                    "doc_num":      doc_num.strip(),
+                    "doc_type":     doc_code,
+                    "filed":        filed_clean or filed,
+                    "cat":          cat,
+                    "cat_label":    CAT_LABELS.get(cat, cat),
+                    "owner":        grantor.strip(),
+                    "grantee":      grantee.strip(),
+                    "amount":       amount,
+                    "legal":        legal.strip(),
                     "prop_address": "",
                     "prop_city":    "",
                     "prop_state":   "FL",
@@ -411,26 +434,140 @@ class ClerkScraper:
                 })
             except Exception as e:
                 log.debug(f"Row parse error: {e}")
+
+        # Also try React/Angular rendered list items
+        if not records:
+            list_data = await page.evaluate("""() => {
+                const results = [];
+                const items = document.querySelectorAll('[class*=row], [class*=item], [class*=result], [class*=record]');
+                items.forEach(item => {
+                    const text = item.innerText.trim();
+                    if (text.length > 20 && text.length < 2000) {
+                        const link = item.querySelector('a');
+                        results.push({text: text, href: link ? link.href : ''});
+                    }
+                });
+                return results.slice(0, 200);
+            }""")
+            log.info(f"List items found: {len(list_data)}")
+            for item in list_data[:5]:
+                log.info(f"  Sample item: {item['text'][:100]}")
+
         return records
 
-    def run(self) -> list[dict]:
-        all_records = []
-        log.info("Initializing session with Clerk portal...")
-        self._init_session()
+    async def _fetch_doc_type(self, page, doc_code: str) -> list[dict]:
+        doc_label, cat = DOC_TYPES.get(doc_code, (doc_code, "other"))
+        log.info(f"Fetching {doc_code} ({doc_label})...")
+        records = []
 
-        for doc_code in DOC_TYPES:
-            doc_label, cat = DOC_TYPES[doc_code]
-            log.info(f"Fetching {doc_code} ({doc_label})...")
+        for attempt in range(MAX_RETRIES):
             try:
-                # Try API first
-                recs = self._try_api_search(doc_code)
-                if not recs:
-                    # Fall back to HTML scraping
-                    recs = self._scrape_html_search(doc_code)
-                log.info(f"  {doc_code}: {len(recs)} records")
-                all_records.extend(recs)
+                await page.goto(self.PORTAL_URL, wait_until="networkidle", timeout=45000)
+                await asyncio.sleep(random.uniform(2, 4))
+
+                html, inputs = await self._wait_and_log(page, f"{doc_code} attempt {attempt+1}")
+
+                if not inputs:
+                    log.warning(f"No inputs found on attempt {attempt+1}, waiting longer...")
+                    await asyncio.sleep(5)
+                    html, inputs = await self._wait_and_log(page, f"{doc_code} retry")
+
+                filled = await self._try_fill_form(page, doc_code)
+
+                await page.wait_for_load_state("networkidle", timeout=30000)
+                await asyncio.sleep(random.uniform(2, 4))
+
+                html2, inputs2 = await self._wait_and_log(page, f"{doc_code} results")
+
+                recs = await self._parse_results(page, doc_code, cat, doc_label)
+                records.extend(recs)
+                log.info(f"  {doc_code}: {len(recs)} records found")
+                break
+
+            except PlaywrightTimeout as e:
+                log.warning(f"Timeout on {doc_code} attempt {attempt+1}: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY * (attempt + 1))
             except Exception as e:
-                log.error(f"Failed {doc_code}: {e}")
+                log.warning(f"Error on {doc_code} attempt {attempt+1}: {e}")
+                if attempt < MAX_RETRIES - 1:
+                    await asyncio.sleep(RETRY_DELAY)
+
+        return records
+
+    async def run(self) -> list[dict]:
+        all_records = []
+
+        async with async_playwright() as pw:
+            browser = await pw.chromium.launch(
+                headless=True,
+                args=[
+                    "--no-sandbox",
+                    "--disable-dev-shm-usage",
+                    "--disable-blink-features=AutomationControlled",
+                    "--disable-web-security",
+                    "--allow-running-insecure-content",
+                    "--disable-features=IsolateOrigins,site-per-process",
+                    "--window-size=1366,768",
+                ]
+            )
+
+            context = await browser.new_context(
+                user_agent="Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                viewport={"width": 1366, "height": 768},
+                locale="en-US",
+                timezone_id="America/New_York",
+                extra_http_headers={
+                    "Accept-Language": "en-US,en;q=0.9",
+                    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8",
+                    "sec-ch-ua": '"Chromium";v="122", "Not(A:Brand";v="24", "Google Chrome";v="122"',
+                    "sec-ch-ua-mobile": "?0",
+                    "sec-ch-ua-platform": '"macOS"',
+                }
+            )
+
+            # Inject stealth JS on every page
+            await context.add_init_script(STEALTH_JS)
+
+            page = await context.new_page()
+
+            # Visit Google first to build realistic browser history
+            log.info("Warming up browser session...")
+            try:
+                await page.goto("https://www.google.com", wait_until="domcontentloaded", timeout=15000)
+                await asyncio.sleep(random.uniform(1, 2))
+            except Exception:
+                pass
+
+            # Now visit the portal
+            log.info(f"Navigating to clerk portal: {self.PORTAL_URL}")
+            try:
+                await page.goto(self.PORTAL_URL, wait_until="networkidle", timeout=45000)
+            except Exception as e:
+                log.warning(f"Initial navigation warning: {e}")
+
+            await asyncio.sleep(3)
+
+            # Log initial page state
+            await self._wait_and_log(page, "INITIAL")
+
+            # Screenshot for debugging (saves to data dir)
+            try:
+                screenshot_path = DATA_DIR / "debug_screenshot.png"
+                await page.screenshot(path=str(screenshot_path), full_page=True)
+                log.info(f"Debug screenshot saved: {screenshot_path}")
+            except Exception as e:
+                log.debug(f"Screenshot error: {e}")
+
+            # Fetch each doc type
+            for doc_code in DOC_TYPES:
+                try:
+                    recs = await self._fetch_doc_type(page, doc_code)
+                    all_records.extend(recs)
+                except Exception as e:
+                    log.error(f"Failed {doc_code}: {e}")
+
+            await browser.close()
 
         log.info(f"Total raw records: {len(all_records)}")
         return all_records
@@ -456,7 +593,7 @@ def build_output(records: list[dict]) -> dict:
     return {
         "fetched_at":   datetime.utcnow().isoformat() + "Z",
         "source":       "Miami-Dade Clerk of Courts Official Records",
-        "date_range":   {
+        "date_range": {
             "from": (datetime.now() - timedelta(days=LOOKBACK_DAYS)).strftime("%Y-%m-%d"),
             "to":   datetime.now().strftime("%Y-%m-%d"),
         },
@@ -487,25 +624,25 @@ def save_ghl_csv(records: list[dict], output_path: Path):
         for r in records:
             fn, ln = split_name(r.get("owner", ""))
             writer.writerow({
-                "First Name":            fn,
-                "Last Name":             ln,
-                "Mailing Address":       r.get("mail_address", ""),
-                "Mailing City":          r.get("mail_city", ""),
-                "Mailing State":         r.get("mail_state", ""),
-                "Mailing Zip":           r.get("mail_zip", ""),
-                "Property Address":      r.get("prop_address", ""),
-                "Property City":         r.get("prop_city", ""),
-                "Property State":        r.get("prop_state", "FL"),
-                "Property Zip":          r.get("prop_zip", ""),
-                "Lead Type":             r.get("cat_label", ""),
-                "Document Type":         DOC_TYPES.get(r.get("doc_type",""), (r.get("doc_type",""),))[0],
-                "Date Filed":            r.get("filed", ""),
-                "Document Number":       r.get("doc_num", ""),
-                "Amount/Debt Owed":      r.get("amount", ""),
-                "Seller Score":          r.get("score", ""),
+                "First Name":             fn,
+                "Last Name":              ln,
+                "Mailing Address":        r.get("mail_address", ""),
+                "Mailing City":           r.get("mail_city", ""),
+                "Mailing State":          r.get("mail_state", ""),
+                "Mailing Zip":            r.get("mail_zip", ""),
+                "Property Address":       r.get("prop_address", ""),
+                "Property City":          r.get("prop_city", ""),
+                "Property State":         r.get("prop_state", "FL"),
+                "Property Zip":           r.get("prop_zip", ""),
+                "Lead Type":              r.get("cat_label", ""),
+                "Document Type":          DOC_TYPES.get(r.get("doc_type",""), (r.get("doc_type",""),))[0],
+                "Date Filed":             r.get("filed", ""),
+                "Document Number":        r.get("doc_num", ""),
+                "Amount/Debt Owed":       r.get("amount", ""),
+                "Seller Score":           r.get("score", ""),
                 "Motivated Seller Flags": " | ".join(r.get("flags", [])),
-                "Source":                "Miami-Dade Clerk Official Records",
-                "Public Records URL":    r.get("clerk_url", ""),
+                "Source":                 "Miami-Dade Clerk Official Records",
+                "Public Records URL":     r.get("clerk_url", ""),
             })
     log.info(f"GHL CSV saved: {output_path}")
 
@@ -516,9 +653,9 @@ def main():
     log.info(f"Lookback: {LOOKBACK_DAYS} days")
     log.info("=" * 60)
 
-    scraper = ClerkScraper(lookback_days=LOOKBACK_DAYS)
-    records = scraper.run()
-    output  = build_output(records)
+    scraper  = ClerkScraper(lookback_days=LOOKBACK_DAYS)
+    records  = asyncio.run(scraper.run())
+    output   = build_output(records)
 
     for path in [DASHBOARD_DIR / "records.json", DATA_DIR / "records.json"]:
         with open(path, "w", encoding="utf-8") as f:
