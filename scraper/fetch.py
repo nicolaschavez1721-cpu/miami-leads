@@ -275,11 +275,12 @@ class ClerkAPIScraper:
         # Use the full portal display name
         portal_name = PORTAL_DOC_NAMES.get(doc_code, doc_code)
 
+        # Match exactly what the browser sends - empty dates, doc type only
         search_url = (
             f"{API_BASE}/home/standardsearch"
             f"?partyName="
-            f"&dateRangeFrom={urllib.parse.quote(self.date_from)}"
-            f"&dateRangeTo={urllib.parse.quote(self.date_to)}"
+            f"&dateRangeFrom="
+            f"&dateRangeTo="
             f"&documentType={urllib.parse.quote(portal_name)}"
             f"&searchT={urllib.parse.quote(portal_name)}"
             f"&firstQuery=y"
@@ -333,7 +334,13 @@ class ClerkAPIScraper:
         import time
         time.sleep(0.5)
 
-        records_url = f"{API_BASE}/SearchResults/getStandardRecords?qs={urllib.parse.quote(str(qs))}"
+        # Add date range to the records fetch
+        records_url = (
+            f"{API_BASE}/SearchResults/getStandardRecords"
+            f"?qs={urllib.parse.quote(str(qs))}"
+            f"&dateRangeFrom={urllib.parse.quote(self.date_from)}"
+            f"&dateRangeTo={urllib.parse.quote(self.date_to)}"
+        )
         log.info(f"GET getStandardRecords for {doc_code}...")
 
         try:
