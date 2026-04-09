@@ -152,9 +152,10 @@ class ParcelLookup:
     def _try_download_pa(self) -> Optional[bytes]:
         """Try several known PA bulk data download endpoints."""
         urls = [
+            "https://opendata.miamidade.gov/api/views/4bkp-rqzg/rows.csv?accessType=DOWNLOAD",
+            "https://opendata.miamidade.gov/api/views/4bkp-rqzg/rows.csv",
             "https://www.miamidade.gov/pa/download_files/NAL.zip",
             "https://www.miamidade.gov/pa/download_files/Nal.zip",
-            "https://opendata.miamidade.gov/api/views/4bkp-rqzg/rows.csv?accessType=DOWNLOAD",
         ]
         for url in urls:
             for attempt in range(MAX_RETRIES):
@@ -329,6 +330,8 @@ class ClerkScraper:
     # Fallback URLs to try
     SEARCH_URLS = [
         "https://onlineservices.miamidadeclerk.gov/officialrecords/StandardSearch.aspx",
+        "https://onlineservices.miamidadeclerk.gov/officialrecords/",
+        "https://onlineservices.miami-dadeclerk.com/officialrecords/StandardSearch.aspx",
         "https://www2.miami-dadeclerk.com/ocs/Search.aspx",
         "https://www2.miami-dadeclerk.com/officialrecords/Search.aspx",
     ]
@@ -347,15 +350,20 @@ class ClerkScraper:
                 resp = await page.goto(url, wait_until="domcontentloaded", timeout=20000)
                 await asyncio.sleep(2)
                 html = await page.content()
-                # Check if we got a real search form
-                if any(kw in html.lower() for kw in ["doctype", "recorded", "instrument", "search", "date"]):
-                    if "<form" in html.lower() or "input" in html.lower():
-                        log.info(f"Found working URL: {url}")
-                        # Log form fields for debugging
-                        soup = BeautifulSoup(html, "lxml")
-                        inputs = soup.find_all("input")
-                        log.info(f"Form inputs found: {[i.get('id','?') + '/' + i.get('name','?') for i in inputs[:15]]}")
-                        return url
+                # Log page content for debugging
+                soup = BeautifulSoup(html, "lxml")
+                inputs = soup.find_all("input")
+                selects = soup.find_all("select")
+                page_text = soup.get_text()[:200].replace("\n", " ")
+                log.info(f"Page inputs: {[i.get('id','?') for i in inputs[:10]]}")
+                log.info(f"Page selects: {[s.get('id','?') for s in selects[:5]]}")
+                log.info(f"Page text: {page_text}")
+                # Accept any page that has form elements OR content (not an error page)
+                has_form = bool(inputs or selects)
+                not_error = not any(e in html.lower() for e in ["404", "not found", "error", "forbidden"])
+                if has_form or (not_error and len(html) > 5000):
+                    log.info(f"Found working URL: {url}")
+                    return url
             except Exception as e:
                 log.warning(f"URL {url} failed: {e}")
         return None
