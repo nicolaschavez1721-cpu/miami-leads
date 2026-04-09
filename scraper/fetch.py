@@ -276,11 +276,15 @@ class ClerkAPIScraper:
         portal_name = PORTAL_DOC_NAMES.get(doc_code, doc_code)
 
         # Match exactly what the browser sends - empty dates, doc type only
+        # Portal uses YYYY-MM-DD format and reversed dates (From=newest, To=oldest)
+        date_from_ymd = (datetime.now() - timedelta(days=self.lookback_days)).strftime("%Y-%m-%d")
+        date_to_ymd   = datetime.now().strftime("%Y-%m-%d")
+
         search_url = (
             f"{API_BASE}/home/standardsearch"
             f"?partyName="
-            f"&dateRangeFrom="
-            f"&dateRangeTo="
+            f"&dateRangeFrom={date_to_ymd}"
+            f"&dateRangeTo={date_from_ymd}"
             f"&documentType={urllib.parse.quote(portal_name)}"
             f"&searchT={urllib.parse.quote(portal_name)}"
             f"&firstQuery=y"
