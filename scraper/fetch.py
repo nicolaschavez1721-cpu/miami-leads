@@ -80,7 +80,7 @@ class PALookup:
                     data = r.json()
                     result = self._parse_pa_response(data)
                     if result.get("prop_address"):
-                        log.debug(f"PA hit for {folio}: {result['prop_address']}")
+                        log.info(f"PA hit for folio {folio}: {result['prop_address']}, {result['prop_city']}")
                         break
                 elif r.status_code == 200 and "features" in r.text:
                     data = r.json()
@@ -88,9 +88,11 @@ class PALookup:
                     if result.get("prop_address"):
                         break
             except Exception as e:
-                log.debug(f"PA lookup error {url}: {e}")
+                log.info(f"PA lookup [{r.status_code if 'r' in dir() else 'ERR'}] {url[:60]}: {str(e)[:100]}")
 
         self.cache[folio] = result
+        if not result.get("prop_address"):
+            log.info(f"PA no result for folio: {folio}")
         return result
 
     def _parse_pa_response(self, data: dict) -> dict:
@@ -555,7 +557,11 @@ class ClerkAPIScraper:
 
                     # Enrich with PA data using folio number
                     folio = str(item.get("foliO_NUMBER") or "").strip()
-                    pa_data = self.pa.lookup(folio) if folio and folio not in ("", "None") else {}
+                    if folio and folio not in ("", "None"):
+                        log.info(f"PA lookup for folio: {folio}")
+                        pa_data = self.pa.lookup(folio)
+                    else:
+                        pa_data = {}
 
                     records.append({
                         "doc_num":      doc_num,
