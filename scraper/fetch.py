@@ -133,21 +133,29 @@ def compute_score_and_flags(record: dict) -> tuple:
 # PROPERTY APPRAISER LOOKUP (ArcGIS REST API)
 # ─────────────────────────────────────────────
 class PALookup:
-    """Looks up property and mailing address from Miami-Dade PA by folio number.
+    """Looks up property and mailing address from Miami-Dade PA.
 
-    Uses the county's public ArcGIS feature service (PaGis layer):
-      https://gisweb.miamidade.gov/ArcGIS/rest/services/MD_NSPApp/MapServer/0/query
+    Uses the PaParcel layer (ID 26) from MD_LandInformation MapServer:
+      https://gisweb.miamidade.gov/arcgis/rest/services/MD_LandInformation/MapServer/26/query
 
-    Response fields:
-      FOLIO              - 13-digit folio
-      TRUE_SITE_ADDR     - property address (e.g. "2224 NE 136 ST")
-      TRUE_OWNER1        - owner name
-      MAILING_BLOCK_LINE3 - mailing street (e.g. "4681 GOLDEN BEACH CT")
-      MAILING_BLOCK_LINE4 - mailing city/state/zip (e.g. "KISSIMEE, FL 34746")
+    This layer has fully separated address fields:
+      TRUE_SITE_ADDR, TRUE_SITE_CITY, TRUE_SITE_ZIP_CODE
+      TRUE_MAILING_ADDR1, TRUE_MAILING_CITY, TRUE_MAILING_STATE, TRUE_MAILING_ZIP_CODE
+      TRUE_OWNER1
+
+    Three lookup strategies:
+      1. By folio number (most precise)
+      2. By street address (reverse lookup)
+      3. By owner name (broadest, used as last resort)
     """
 
-    ARCGIS_URL = "https://gisweb.miamidade.gov/ArcGIS/rest/services/MD_NSPApp/MapServer/0/query"
-    RATE_LIMIT_DELAY = 0.25  # seconds between requests
+    ARCGIS_URL = "https://gisweb.miamidade.gov/arcgis/rest/services/MD_LandInformation/MapServer/26/query"
+    OUT_FIELDS = ",".join([
+        "FOLIO", "TRUE_SITE_ADDR", "TRUE_SITE_CITY", "TRUE_SITE_ZIP_CODE",
+        "TRUE_MAILING_ADDR1", "TRUE_MAILING_CITY", "TRUE_MAILING_STATE",
+        "TRUE_MAILING_ZIP_CODE", "TRUE_OWNER1",
+    ])
+    RATE_LIMIT_DELAY = 0.25
 
     def __init__(self):
         self.session = requests.Session()
@@ -165,159 +173,116 @@ class PALookup:
         digits = re.sub(r"[^0-9]", "", str(folio))
         return digits.zfill(13)
 
-    def lookup(self, folio: str) -> dict:
+    @staticmethod
+    def _sanitize(val: str) -> str:
+        """Remove single quotes to prevent ArcGIS SQL injection."""
+        return str(val).replace("'", "").strip()
+
+    # ── core query ──────────────────────────────
+
+    def _query(self, where: str) -> dict:
+        """Run an ArcGIS query and return parsed result or {}."""
         import time
-
-        if not folio or str(folio).strip() in ("", "None", "null", "0"):
-            return {}
-
-        folio_clean = self.format_folio(folio)
-        if len(folio_clean) < 8:
-            return {}
-
-        if folio_clean in self.cache:
-            return self.cache[folio_clean]
-
-        result = self._query_arcgis(folio_clean)
-        self.cache[folio_clean] = result
-
-        if result.get("prop_address"):
-            self.stats["hits"] += 1
-            log.info(f"PA hit {folio_clean}: {result['prop_address']}, {result.get('prop_city','')}")
-        else:
-            self.stats["misses"] += 1
-            log.debug(f"PA miss for folio: {folio_clean}")
-
-        time.sleep(self.RATE_LIMIT_DELAY)
-        return result
-
-    def lookup_by_address(self, address: str) -> dict:
-        """Reverse-lookup: find property by street address via ArcGIS.
-
-        Used when the clerk record has an address but no folio number.
-        Returns mailing address info if found.
-        """
-        import time
-
-        if not address or len(address) < 5:
-            return {}
-
-        # Cache on address too
-        cache_key = f"addr:{address.upper()}"
-        if cache_key in self.cache:
-            return self.cache[cache_key]
-
         params = {
-            "where": f"TRUE_SITE_ADDR LIKE '{address.upper().replace(chr(39), '')}%'",
-            "outFields": "FOLIO,TRUE_SITE_ADDR,TRUE_OWNER1,MAILING_BLOCK_LINE3,MAILING_BLOCK_LINE4",
+            "where": where,
+            "outFields": self.OUT_FIELDS,
             "returnGeometry": "false",
             "resultRecordCount": 1,
             "f": "json",
         }
-
-        result = {}
         try:
             r = self.session.get(self.ARCGIS_URL, params=params, timeout=15)
-            if r.status_code == 200:
-                data = r.json()
-                features = data.get("features", [])
-                if features:
-                    attrs = features[0].get("attributes", {})
-                    result = self._parse_attributes(attrs)
-                    if result.get("mail_address"):
-                        self.stats["hits"] += 1
-                        log.info(f"PA addr-hit '{address}': mail={result['mail_address']}")
-        except Exception as e:
-            log.debug(f"ArcGIS addr lookup error: {e}")
-
-        self.cache[cache_key] = result
-        time.sleep(self.RATE_LIMIT_DELAY)
-        return result
-
-    def _query_arcgis(self, folio: str) -> dict:
-        """Query the ArcGIS PaGis layer by folio number."""
-        params = {
-            "where": f"FOLIO='{folio}'",
-            "outFields": "FOLIO,TRUE_SITE_ADDR,TRUE_OWNER1,MAILING_BLOCK_LINE3,MAILING_BLOCK_LINE4",
-            "returnGeometry": "false",
-            "f": "json",
-        }
-
-        try:
-            r = self.session.get(self.ARCGIS_URL, params=params, timeout=15)
-
             if r.status_code != 200:
-                log.warning(f"ArcGIS {r.status_code} for folio {folio}")
                 self.stats["errors"] += 1
                 return {}
-
             data = r.json()
-
-            # ArcGIS returns {"features": [{"attributes": {...}}]}
             features = data.get("features", [])
             if not features:
                 return {}
-
-            attrs = features[0].get("attributes", {})
-            return self._parse_attributes(attrs)
-
-        except requests.exceptions.RequestException as e:
-            log.warning(f"ArcGIS error for {folio}: {e}")
+            return self._parse(features[0].get("attributes", {}))
+        except Exception as e:
+            log.debug(f"ArcGIS query error: {e}")
             self.stats["errors"] += 1
             return {}
-        except (ValueError, KeyError) as e:
-            log.warning(f"ArcGIS parse error for {folio}: {e}")
-            self.stats["errors"] += 1
-            return {}
+        finally:
+            time.sleep(self.RATE_LIMIT_DELAY)
 
     @staticmethod
-    def _parse_attributes(attrs: dict) -> dict:
-        """Parse ArcGIS PaGis attributes into our standard address fields.
-
-        TRUE_SITE_ADDR      = "2224 NE 136 ST"
-        MAILING_BLOCK_LINE3 = "4681 GOLDEN BEACH CT"
-        MAILING_BLOCK_LINE4 = "KISSIMEE, FL 34746"
-        """
-        prop_address = (attrs.get("TRUE_SITE_ADDR") or "").strip()
-
-        mail_address = (attrs.get("MAILING_BLOCK_LINE3") or "").strip()
-
-        # Parse city/state/zip from MAILING_BLOCK_LINE4
-        # Format: "CITY, ST ZIPCODE" e.g. "KISSIMEE, FL 34746"
-        mail_city, mail_state, mail_zip = "", "FL", ""
-        line4 = (attrs.get("MAILING_BLOCK_LINE4") or "").strip()
-        if line4:
-            m = re.match(r"^(.+?),\s*([A-Z]{2})\s+(\d{5}(?:-\d{4})?)", line4)
-            if m:
-                mail_city = m.group(1).strip()
-                mail_state = m.group(2)
-                mail_zip = m.group(3)
-            else:
-                # Try without comma: "MIAMI FL 33128"
-                m2 = re.match(r"^(.+?)\s+([A-Z]{2})\s+(\d{5}(?:-\d{4})?)", line4)
-                if m2:
-                    mail_city = m2.group(1).strip()
-                    mail_state = m2.group(2)
-                    mail_zip = m2.group(3)
-                else:
-                    # Fallback: just use the whole line
-                    mail_city = line4
-
-        # Try to extract city from site address (not always possible)
-        # The ArcGIS layer only gives street, not city/zip for site address
-        # We'll leave prop_city empty — the dashboard can show just the street
-        prop_city = ""
-        prop_zip = ""
-
+    def _parse(a: dict) -> dict:
+        """Parse PaParcel layer 26 attributes into standard fields."""
         return {
-            "prop_address": prop_address,
-            "prop_city":    prop_city,
-            "prop_zip":     prop_zip,
-            "mail_address": mail_address,
-            "mail_city":    mail_city,
-            "mail_state":   mail_state,
-            "mail_zip":     mail_zip,
+            "prop_address": (a.get("TRUE_SITE_ADDR") or "").strip(),
+            "prop_city":    (a.get("TRUE_SITE_CITY") or "").strip(),
+            "prop_zip":     (a.get("TRUE_SITE_ZIP_CODE") or "").strip().split("-")[0],
+            "mail_address": (a.get("TRUE_MAILING_ADDR1") or "").strip(),
+            "mail_city":    (a.get("TRUE_MAILING_CITY") or "").strip(),
+            "mail_state":   (a.get("TRUE_MAILING_STATE") or "FL").strip(),
+            "mail_zip":     (a.get("TRUE_MAILING_ZIP_CODE") or "").strip().split("-")[0],
         }
+
+    # ── public lookup methods ───────────────────
+
+    def lookup(self, folio: str) -> dict:
+        """Lookup by folio number."""
+        if not folio or str(folio).strip() in ("", "None", "null", "0"):
+            return {}
+
+        folio_clean = self.format_folio(folio)
+        cache_key = f"folio:{folio_clean}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        result = self._query(f"FOLIO='{folio_clean}'")
+        self.cache[cache_key] = result
+
+        if result.get("prop_address"):
+            self.stats["hits"] += 1
+            log.info(f"PA folio-hit {folio_clean}: {result['prop_address']}, {result['prop_city']}")
+        else:
+            self.stats["misses"] += 1
+        return result
+
+    def lookup_by_address(self, address: str) -> dict:
+        """Reverse-lookup by street address."""
+        if not address or len(address) < 5:
+            return {}
+
+        addr = self._sanitize(address).upper()
+        cache_key = f"addr:{addr}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        result = self._query(f"TRUE_SITE_ADDR LIKE '{addr}%'")
+        self.cache[cache_key] = result
+
+        if result.get("mail_address"):
+            self.stats["hits"] += 1
+            log.info(f"PA addr-hit '{address}': {result['mail_address']}, {result['mail_city']}")
+        return result
+
+    def lookup_by_owner(self, owner: str) -> dict:
+        """Lookup by owner name. Last resort — may return wrong property
+        if the owner has multiple parcels, but still useful for mailing addr."""
+        if not owner or len(owner) < 4:
+            return {}
+
+        # Skip generic owner names that would match too many records
+        skip = ("LLC", "CORP", "INC", "LTD", "TRUST", "BANK", "COUNTY", "STATE", "USA")
+        owner_clean = self._sanitize(owner).upper()
+        if owner_clean in skip or len(owner_clean) < 4:
+            return {}
+
+        cache_key = f"owner:{owner_clean}"
+        if cache_key in self.cache:
+            return self.cache[cache_key]
+
+        result = self._query(f"TRUE_OWNER1 LIKE '{owner_clean}%'")
+        self.cache[cache_key] = result
+
+        if result.get("prop_address"):
+            self.stats["hits"] += 1
+            log.info(f"PA owner-hit '{owner}': {result['prop_address']}, {result['prop_city']}")
+        return result
 
 
 class ClerkAPIScraper:
@@ -647,12 +612,18 @@ class ClerkAPIScraper:
                     if folio and folio not in ("", "0", "None", "null"):
                         pa_data = self.pa.lookup(folio)
 
-                    # Fallback: if no folio hit but we have a clerk address,
-                    # try reverse-lookup by address on ArcGIS
+                    # Fallback 2: reverse-lookup by street address
                     if not pa_data.get("mail_address") and prop_addr_raw:
                         addr_data = self.pa.lookup_by_address(prop_addr_raw)
-                        if addr_data:
+                        if addr_data and addr_data.get("mail_address"):
                             pa_data = addr_data
+
+                    # Fallback 3: lookup by owner name
+                    owner_raw = str(item.get("firsT_PARTY") or "").strip()
+                    if not pa_data.get("prop_address") and owner_raw:
+                        owner_data = self.pa.lookup_by_owner(owner_raw)
+                        if owner_data and owner_data.get("prop_address"):
+                            pa_data = owner_data
 
                     records.append({
                         "doc_num":      doc_num,
@@ -660,7 +631,7 @@ class ClerkAPIScraper:
                         "filed":        filed,
                         "cat":          cat,
                         "cat_label":    CAT_LABELS.get(cat, cat),
-                        "owner":        str(item.get("firsT_PARTY") or "").strip(),
+                        "owner":        owner_raw,
                         "grantee":      str(item.get("seconD_PARTY") or "").strip(),
                         "amount":       amount,
                         "legal":        str(item.get("legaL_DESCRIPTION") or "").strip(),
@@ -801,7 +772,7 @@ def main():
 
     today = datetime.now().strftime("%Y%m%d")
     save_ghl_csv(output["records"], DATA_DIR / f"ghl_export_{today}.csv")
-    log.info(f"Done. Total: {output['total']} | With address: {output['with_address']}")
+    log.info(f"Done. Total: {output['total']} | With address: {output['with_address']} | With mail: {output['with_mail']} | With folio: {output['with_folio']}")
 
 
 if __name__ == "__main__":
