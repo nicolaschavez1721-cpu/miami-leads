@@ -891,12 +891,13 @@ class Enricher:
 # CLERK PORTAL (Playwright)
 # ─────────────────────────────────────────────────────────────────────────────
 FETCH_JS = """
-async ([url, method]) => {
+async ([url, method, body]) => {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 55000);
   try {
     const r = await fetch(url, {
       method, credentials: 'include', signal: ctl.signal,
+      body: body === null || body === undefined ? undefined : body,
       headers: {'Accept': 'application/json, text/plain, */*',
                 'Content-Type': 'application/json; charset=utf-8'},
     });
@@ -1003,6 +1004,8 @@ class ClerkPortal:
         """Learn the real API base from the portal's own XHR/fetch calls."""
         try:
             url = req.url
+            if "standardsearch" in url.lower() and req.method != "GET":
+                log.info(f"PORTAL OWN SEARCH REQUEST: {req.method} {url[:300]} body={str(req.post_data)[:400]}")
             i = url.find("/api/")
             if i > 0 and req.resource_type in ("xhr", "fetch"):
                 if len(self.api_seen) < 40:
@@ -1047,14 +1050,15 @@ class ClerkPortal:
         await self.screenshot("search_page_failed")
         raise RuntimeError(f"Could not open the clerk search page ({last_err})")
 
-    async def api(self, method: str, path: str, params: dict | None = None) -> tuple:
+    async def api(self, method: str, path: str, params: dict | None = None,
+                  body: str | None = None) -> tuple:
         url = f"{self.api_base}/{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
         last = (0, "")
         for attempt in range(1, 4):
             try:
-                res = await self.page.evaluate(FETCH_JS, [url, method])
+                res = await self.page.evaluate(FETCH_JS, [url, method, body])
                 last = (res["status"], res["text"])
             except Exception as e:  # noqa: BLE001  (page crashed / navigated)
                 last = (0, str(e))
@@ -1164,29 +1168,50 @@ class ClerkPortal:
         return mapping
 
     # ── search ──────────────────────────────────────────────────────────────
+    def _search_variants(self, portal_type: str, day: str):
+        """Yield (label, params, body) request shapes; the accepted one is remembered."""
+        y, m, dd = day.split("-")
+        code = portal_type.rsplit(" - ", 1)[-1].strip()
+        dates = {"iso": day, "mdy": f"{m}/{dd}/{y}"}
+        types = {"name": portal_type, "code": code}
+        for dl, dv in dates.items():
+            for tl, tv in types.items():
+                p = {"partyName": "", "dateRangeFrom": dv, "dateRangeTo": dv,
+                     "documentType": tv, "searchT": tv,
+                     "firstQuery": "y", "searchtype": "Name/Document"}
+                yield f"query/{dl}/{tl}", p, None
+                yield f"json/{dl}/{tl}", None, json.dumps(p)
+
     async def search_day(self, portal_type: str, day: str) -> list | None:
-        params = {
-            "partyName": "", "dateRangeFrom": day, "dateRangeTo": day,
-            "documentType": portal_type, "searchT": portal_type,
-            "firstQuery": "y", "searchtype": "Name/Document",
-        }
-        status, text = await self.api("POST", "home/standardsearch", params)
-        if status != 200:
+        chosen = getattr(self, "search_variant", None)
+        variants = list(self._search_variants(portal_type, day))
+        if chosen:
+            variants = [v for v in variants if v[0] == chosen] or variants
+        d = None
+        for label, params, body in variants:
+            status, text = await self.api("POST", "home/standardsearch", params, body)
+            if status != 200:
+                self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
+                if self.invalid_logged <= 4:
+                    log.warning(f"standardsearch[{label}] HTTP {status} for {portal_type!r}: {text[:300]}")
+                continue
+            try:
+                d = json.loads(text)
+            except Exception:  # noqa: BLE001
+                log.warning(f"standardsearch non-JSON: {text[:200]}")
+                continue
+            if isinstance(d, dict) and d.get("qs") and d.get("isValidSearch") is not False:
+                if chosen != label:
+                    log.info(f"standardsearch request shape accepted: {label}")
+                    self.search_variant = label
+                break
             self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
-            if self.invalid_logged <= 4:
-                log.warning(f"standardsearch HTTP {status} for {portal_type!r}: {text[:400]}")
-            return None
-        try:
-            d = json.loads(text)
-        except Exception:  # noqa: BLE001
-            log.warning(f"standardsearch non-JSON: {text[:200]}")
+            if self.invalid_logged <= 10:
+                log.warning(f"standardsearch[{label}] not accepted for {portal_type!r} {day}: {text[:300]}")
+            d = None
+        if d is None:
             return None
         qs = d.get("qs") if isinstance(d, dict) else None
-        if not qs or (isinstance(d, dict) and d.get("isValidSearch") is False):
-            self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
-            if self.invalid_logged <= 4:
-                log.warning(f"standardsearch not accepted for {portal_type!r} {day}: {text[:400]}")
-            return None
         status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
         if status != 200:
             return None
