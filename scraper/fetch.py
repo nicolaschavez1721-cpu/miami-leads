@@ -1229,6 +1229,11 @@ class ClerkPortal:
             # A shape only counts as understood if the portal echoes our criteria back
             # (or returns rows); an all-null echo means it silently ignored the request.
             understood = bool(items) or any(v not in (None, "") for v in (crit or {}).values())
+            self.echo_logged = getattr(self, "echo_logged", 0) + 1
+            if self.echo_logged <= 6:
+                log.info(f"echo[{label}] {portal_type!r} {day}: criteria={ {k: v for k, v in (crit or {}).items() if v not in (None, '')} } rows={len(items)}")
+                if items and self.echo_logged <= 2:
+                    log.info(f"sample row: {json.dumps(items[0])[:1500]}")
             if understood:
                 if chosen != label:
                     log.info(f"search request shape understood: {label} ({len(items)} rows)")
