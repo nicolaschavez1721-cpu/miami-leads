@@ -1184,6 +1184,16 @@ class ClerkPortal:
                     strings.add(s)
         except Exception as e:  # noqa: BLE001
             log.warning(f"Doc-type discovery from page failed: {e}")
+        official = []
+        status, text = await self.api("GET", "home/documentTypes")
+        if status == 200:
+            try:
+                official = [x.strip() for x in json.loads(text) if isinstance(x, str) and x.strip()]
+            except Exception:  # noqa: BLE001
+                official = []
+        if official:
+            log.info(f"Portal document-type list ({len(official)}): {' | '.join(official)}")
+            strings = set(official)
         log.info(f"Discovered {len(strings)} portal document types")
         mapping = {code: [] for code in LEAD_TYPES}
         for s in sorted(strings):
@@ -1192,7 +1202,8 @@ class ClerkPortal:
                 mapping[code].append(s)
         for code, meta in LEAD_TYPES.items():
             for k in meta["known"]:
-                if k not in mapping[code]:
+                # with the official list, never search for a name the portal doesn't have
+                if k not in mapping[code] and not official:
                     mapping[code].append(k)
         for code, names in mapping.items():
             if names:
