@@ -1213,6 +1213,9 @@ class ClerkPortal:
             return None
         qs = d.get("qs") if isinstance(d, dict) else None
         status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
+        self.results_logged = getattr(self, "results_logged", 0) + 1
+        if self.results_logged <= 4:
+            log.info(f"getStandardRecords[{portal_type} {day}] -> {status} len={len(text)} {text[:600]}")
         if status != 200:
             return None
         try:
