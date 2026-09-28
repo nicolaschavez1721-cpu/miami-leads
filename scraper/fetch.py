@@ -1078,6 +1078,40 @@ class ClerkPortal:
                 break
         return last
 
+
+    async def probe(self):
+        """One-off diagnostics: what does the portal's own search UI / lookup API look like?"""
+        page = self.page
+        try:
+            ctrls = await page.evaluate("""() => Array.from(document.querySelectorAll(
+                'input,select,textarea,button,a,[role=tab],[role=combobox],label'))
+                .map(e => [e.tagName, e.type||'', e.name||'', e.id||'', e.placeholder||'',
+                           e.getAttribute('aria-label')||'', (e.innerText||'').trim().slice(0,40),
+                           e.getAttribute('href')||''].join('|')).slice(0,120)""")
+            log.info("PROBE controls: " + " ;; ".join(ctrls))
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"PROBE controls failed: {e}")
+        for path in ["home/getDocumentTypes", "home/documentTypes", "home/GetDocumentTypes",
+                     "settings/documentTypes", "settings/getDocumentTypes", "lookup/documentTypes",
+                     "Lookup/DocumentTypes", "home/getDocTypes", "search/documentTypes",
+                     "home/getSearchTypes", "home/GetDate"]:
+            try:
+                res = await page.evaluate(FETCH_JS, [f"{self.api_base}/{path}", "GET", None])
+                log.info(f"PROBE {path} -> {res['status']} len={len(res['text'])} {res['text'][:300]}")
+            except Exception as e:  # noqa: BLE001
+                log.info(f"PROBE {path} failed: {e}")
+        for sel in ["text=/standard search/i", "text=/name.*document/i", "text=/document type/i"]:
+            try:
+                loc = page.locator(sel).first
+                if await loc.count():
+                    log.info(f"PROBE found UI element {sel}")
+                    await loc.click(timeout=3000)
+                    await page.wait_for_timeout(2500)
+            except Exception:  # noqa: BLE001
+                pass
+        log.info("PROBE api calls seen: " + " ;; ".join(sorted(set(self.api_seen))[:40]))
+        await self.screenshot("probe")
+
     async def check_login(self):
         status, text = await self.api("GET", "home/isLoggedIn")
         log.info(f"isLoggedIn -> {status} {text[:120]}")
@@ -1452,6 +1486,7 @@ def stack_flags(records: list):
 async def scrape_clerk(days: list) -> list:
     parts, valid_searches, attempted = [], 0, 0
     async with ClerkPortal() as portal:
+        await portal.probe()
         mapping = await portal.discover_types()
         for code, portal_types in mapping.items():
             code_parts = 0
