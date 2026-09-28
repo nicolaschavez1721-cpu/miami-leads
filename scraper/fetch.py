@@ -68,7 +68,16 @@ LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))
 CLERK_BASE = os.environ.get(
     "CLERK_BASE_URL", "https://onlineservices.miamidadeclerk.gov/officialrecords"
 ).rstrip("/")
-CLERK_SEARCH_PAGE = f"{CLERK_BASE}/StandardSearch.aspx"
+# The portal is now a single-page app. The legacy StandardSearch.aspx URL is routed by the
+# client to ".../officialrecords/undefined" (blank page, no login link, API 404s), so the
+# SPA root is tried first and the legacy/hash routes only as fallbacks.
+CLERK_SEARCH_PAGES = [
+    f"{CLERK_BASE}/",
+    f"{CLERK_BASE}/#/standardsearch",
+    f"{CLERK_BASE}/standardsearch",
+    f"{CLERK_BASE}/StandardSearch.aspx",
+]
+CLERK_SEARCH_PAGE = CLERK_SEARCH_PAGES[0]
 CLERK_API = f"{CLERK_BASE}/api"
 
 CLERK_EMAIL = os.environ.get("CLERK_EMAIL", "")
@@ -918,6 +927,8 @@ class ClerkPortal:
         self.page = None
         self.network_strings: set = set()
         self.logged_in = None
+        self.api_base = CLERK_API
+        self.api_seen: list = []
 
     async def __aenter__(self):
         from playwright.async_api import async_playwright
@@ -935,12 +946,16 @@ class ClerkPortal:
             log.info("Added CLERK_SESSION cookie to browser")
         self.page = await self.context.new_page()
         self.page.on("response", self._sniff)
+        self.page.on("request", self._sniff_request)
         await self.open_search_page()
         self.logged_in = await self.check_login()
         if not self.logged_in and CLERK_EMAIL and CLERK_PASSWORD:
             await self.login()
             self.logged_in = await self.check_login()
-        log.info(f"Clerk session ready (logged in: {self.logged_in})")
+        log.info(f"Clerk session ready (logged in: {self.logged_in}) api_base={self.api_base}")
+        if self.logged_in is None:
+            for line in self.api_seen[:25]:
+                log.info(f"  portal call: {line}")
         return self
 
     async def __aexit__(self, *exc):
@@ -984,25 +999,56 @@ class ClerkPortal:
         except Exception:  # noqa: BLE001
             pass
 
+    def _sniff_request(self, req):
+        """Learn the real API base from the portal's own XHR/fetch calls."""
+        try:
+            url = req.url
+            i = url.find("/api/")
+            if i > 0 and req.resource_type in ("xhr", "fetch"):
+                if len(self.api_seen) < 40:
+                    self.api_seen.append(f"{req.method} {url[:160]}")
+                base = url[:i + 4]
+                if base != self.api_base and base.startswith(CLERK_BASE.split("/officialrecords")[0]):
+                    log.info(f"Portal API base discovered: {base}")
+                    self.api_base = base
+        except Exception:  # noqa: BLE001
+            pass
+
+    async def _page_is_usable(self) -> bool:
+        url = self.page.url
+        if url.rstrip("/").lower().endswith("/undefined"):
+            return False
+        try:
+            body = (await self.page.evaluate(
+                "() => (document.body && document.body.innerText || '').trim().length"))
+        except Exception:  # noqa: BLE001
+            return False
+        return body > 50
+
     async def open_search_page(self):
+        last_err = None
         for attempt in range(1, 4):
-            try:
-                await self.page.goto(CLERK_SEARCH_PAGE, wait_until="domcontentloaded",
-                                     timeout=60000)
+            for target in CLERK_SEARCH_PAGES:
                 try:
-                    await self.page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:  # noqa: BLE001
-                    pass
-                log.info(f"Opened search page: {self.page.url}")
-                return
-            except Exception as e:  # noqa: BLE001
-                log.warning(f"Search page load failed (attempt {attempt}): {e}")
-                await asyncio.sleep(5 * attempt)
+                    await self.page.goto(target, wait_until="domcontentloaded", timeout=60000)
+                    try:
+                        await self.page.wait_for_load_state("networkidle", timeout=20000)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    log.info(f"Opened {target} -> {self.page.url}")
+                    if await self._page_is_usable():
+                        CLERK_SEARCH_PAGES.sort(key=lambda t: t != target)  # remember winner
+                        return
+                    log.warning(f"Page at {self.page.url} looks empty/invalid – trying next route")
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    log.warning(f"Search page load failed ({target}, attempt {attempt}): {e}")
+            await asyncio.sleep(5 * attempt)
         await self.screenshot("search_page_failed")
-        raise RuntimeError("Could not open the clerk search page")
+        raise RuntimeError(f"Could not open the clerk search page ({last_err})")
 
     async def api(self, method: str, path: str, params: dict | None = None) -> tuple:
-        url = f"{CLERK_API}/{path}"
+        url = f"{self.api_base}/{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
         last = (0, "")
@@ -1059,6 +1105,14 @@ class ClerkPortal:
                     break
             if not clicked:
                 log.warning("No login link found on the search page")
+                try:
+                    links = await page.evaluate(
+                        "() => Array.from(document.querySelectorAll('a,button'))"
+                        ".map(e => (e.innerText||'').trim()).filter(Boolean).slice(0,40)")
+                    log.warning(f"Visible links/buttons: {links}")
+                except Exception:  # noqa: BLE001
+                    pass
+                await self.screenshot("no_login_link")
             await page.wait_for_selector("input[type=password]", timeout=30000)
             user = page.locator(
                 "input[type=email], input[name*='user' i], input[id*='user' i], "
