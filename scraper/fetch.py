@@ -1181,56 +1181,65 @@ class ClerkPortal:
                      "firstQuery": "y", "searchtype": "Name/Document"}
                 yield f"query/{dl}/{tl}", p, None
                 yield f"json/{dl}/{tl}", None, json.dumps(p)
+                yield f"both/{dl}/{tl}", p, json.dumps(p)
+
+    async def _run_search(self, params, body):
+        """One standardsearch + getStandardRecords round trip -> (items, criteria, note)."""
+        status, text = await self.api("POST", "home/standardsearch", params, body)
+        if status != 200:
+            return None, None, f"HTTP {status}: {text[:200]}"
+        try:
+            d = json.loads(text)
+        except Exception:  # noqa: BLE001
+            return None, None, f"non-JSON: {text[:200]}"
+        qs = d.get("qs") if isinstance(d, dict) else None
+        if not qs or d.get("isValidSearch") is False:
+            return None, None, f"not accepted: {text[:200]}"
+        status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
+        if status != 200:
+            return None, None, f"records HTTP {status}: {text[:200]}"
+        try:
+            d = json.loads(text)
+        except Exception:  # noqa: BLE001
+            return None, None, f"records non-JSON: {text[:200]}"
+        items, crit = [], {}
+        if isinstance(d, list):
+            items = d
+        elif isinstance(d, dict):
+            crit = d.get("searchCritiriea") or d.get("searchCriteria") or {}
+            for k in ("recordingModels", "records", "results", "data", "items"):
+                if isinstance(d.get(k), list):
+                    items = d[k]
+                    break
+        return [i for i in items if isinstance(i, dict)], crit, ""
 
     async def search_day(self, portal_type: str, day: str) -> list | None:
         chosen = getattr(self, "search_variant", None)
         variants = list(self._search_variants(portal_type, day))
         if chosen:
             variants = [v for v in variants if v[0] == chosen] or variants
-        d = None
+        fallback = None
         for label, params, body in variants:
-            status, text = await self.api("POST", "home/standardsearch", params, body)
-            if status != 200:
+            items, crit, note = await self._run_search(params, body)
+            if items is None:
                 self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
-                if self.invalid_logged <= 4:
-                    log.warning(f"standardsearch[{label}] HTTP {status} for {portal_type!r}: {text[:300]}")
+                if self.invalid_logged <= 12:
+                    log.warning(f"search[{label}] {portal_type!r} {day}: {note}")
                 continue
-            try:
-                d = json.loads(text)
-            except Exception:  # noqa: BLE001
-                log.warning(f"standardsearch non-JSON: {text[:200]}")
-                continue
-            if isinstance(d, dict) and d.get("qs") and d.get("isValidSearch") is not False:
+            # A shape only counts as understood if the portal echoes our criteria back
+            # (or returns rows); an all-null echo means it silently ignored the request.
+            understood = bool(items) or any(v not in (None, "") for v in (crit or {}).values())
+            if understood:
                 if chosen != label:
-                    log.info(f"standardsearch request shape accepted: {label}")
+                    log.info(f"search request shape understood: {label} ({len(items)} rows)")
                     self.search_variant = label
-                break
-            self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
-            if self.invalid_logged <= 10:
-                log.warning(f"standardsearch[{label}] not accepted for {portal_type!r} {day}: {text[:300]}")
-            d = None
-        if d is None:
-            return None
-        qs = d.get("qs") if isinstance(d, dict) else None
-        status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
-        self.results_logged = getattr(self, "results_logged", 0) + 1
-        if self.results_logged <= 4:
-            log.info(f"getStandardRecords[{portal_type} {day}] -> {status} len={len(text)} {text[:600]}")
-        if status != 200:
-            return None
-        try:
-            d = json.loads(text)
-        except Exception:  # noqa: BLE001
-            return None
-        items = []
-        if isinstance(d, list):
-            items = d
-        elif isinstance(d, dict):
-            for k in ("recordingModels", "records", "results", "data", "items"):
-                if isinstance(d.get(k), list):
-                    items = d[k]
-                    break
-        return [i for i in items if isinstance(i, dict)]
+                return items
+            if fallback is None:
+                fallback = items
+        if fallback is not None and not chosen:
+            log.warning("No request shape made the portal echo the search criteria "
+                        "(returning empty results)")
+        return fallback
 
 
 def classify_portal_type(name: str) -> str | None:
