@@ -1075,7 +1075,8 @@ class ClerkPortal:
         return last
 
     async def check_login(self):
-        status, text = await self.api("GET", "Environment/isLoggedIn")
+        status, text = await self.api("GET", "home/isLoggedIn")
+        log.info(f"isLoggedIn -> {status} {text[:120]}")
         if status != 200:
             return None
         try:
@@ -1171,6 +1172,9 @@ class ClerkPortal:
         }
         status, text = await self.api("POST", "home/standardsearch", params)
         if status != 200:
+            self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
+            if self.invalid_logged <= 4:
+                log.warning(f"standardsearch HTTP {status} for {portal_type!r}: {text[:400]}")
             return None
         try:
             d = json.loads(text)
@@ -1179,7 +1183,9 @@ class ClerkPortal:
             return None
         qs = d.get("qs") if isinstance(d, dict) else None
         if not qs or (isinstance(d, dict) and d.get("isValidSearch") is False):
-            log.debug(f"standardsearch invalid for {portal_type} {day}: {text[:200]}")
+            self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
+            if self.invalid_logged <= 4:
+                log.warning(f"standardsearch not accepted for {portal_type!r} {day}: {text[:400]}")
             return None
         status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
         if status != 200:
