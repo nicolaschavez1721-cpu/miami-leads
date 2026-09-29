@@ -1214,19 +1214,20 @@ class ClerkPortal:
 
     # ── search ──────────────────────────────────────────────────────────────
     def _search_variants(self, portal_type: str, day: str):
-        """Yield (label, params, body) request shapes; the accepted one is remembered."""
+        """Yield (label, params, body) request shapes; the verified one is remembered."""
         y, m, dd = day.split("-")
         code = portal_type.rsplit(" - ", 1)[-1].strip()
         dates = {"iso": day, "mdy": f"{m}/{dd}/{y}"}
-        types = {"name": portal_type, "code": code}
+        pairs = {"code+code": (code, code), "code+name": (code, portal_type),
+                 "name+name": (portal_type, portal_type), "name+code": (portal_type, code),
+                 "code+none": (code, ""), "name+none": (portal_type, "")}
         for dl, dv in dates.items():
-            for tl, tv in types.items():
+            for pl, (dt, st) in pairs.items():
                 p = {"partyName": "", "dateRangeFrom": dv, "dateRangeTo": dv,
-                     "documentType": tv, "searchT": tv,
+                     "documentType": dt, "searchT": st,
                      "firstQuery": "y", "searchtype": "Name/Document"}
-                yield f"query/{dl}/{tl}", p, None
-                yield f"json/{dl}/{tl}", None, json.dumps(p)
-                yield f"both/{dl}/{tl}", p, json.dumps(p)
+                yield f"query/{dl}/{pl}", p, None
+                yield f"both/{dl}/{pl}", p, json.dumps(p)
 
     async def _run_search(self, params, body):
         """One standardsearch + getStandardRecords round trip -> (items, criteria, note)."""
@@ -1258,7 +1259,13 @@ class ClerkPortal:
                     break
         return [i for i in items if isinstance(i, dict)], crit, ""
 
+    @staticmethod
+    def _row_matches(item: dict, code: str) -> bool:
+        t = re.sub(r"\s+", " ", str(item.get("doC_TYPE") or item.get("doc_type") or "")).strip().upper()
+        return t.endswith(" - " + code.upper()) or t == code.upper()
+
     async def search_day(self, portal_type: str, day: str) -> list | None:
+        code = portal_type.rsplit(" - ", 1)[-1].strip()
         chosen = getattr(self, "search_variant", None)
         variants = list(self._search_variants(portal_type, day))
         if chosen:
@@ -1268,27 +1275,25 @@ class ClerkPortal:
             items, crit, note = await self._run_search(params, body)
             if items is None:
                 self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
-                if self.invalid_logged <= 12:
+                if self.invalid_logged <= 6:
                     log.warning(f"search[{label}] {portal_type!r} {day}: {note}")
                 continue
-            # A shape only counts as understood if the portal echoes our criteria back
-            # (or returns rows); an all-null echo means it silently ignored the request.
-            understood = bool(items) or any(v not in (None, "") for v in (crit or {}).values())
+            if not items:
+                if fallback is None:
+                    fallback = items          # genuinely empty (or unverifiable) day
+                continue
+            good = [i for i in items if self._row_matches(i, code)]
+            if len(good) >= 0.9 * len(items):
+                if chosen != label:
+                    log.info(f"search request shape VERIFIED: {label} "
+                             f"({len(good)}/{len(items)} rows are {code})")
+                    self.search_variant = label
+                return good
             self.echo_logged = getattr(self, "echo_logged", 0) + 1
             if self.echo_logged <= 6:
-                log.info(f"echo[{label}] {portal_type!r} {day}: criteria={ {k: v for k, v in (crit or {}).items() if v not in (None, '')} } rows={len(items)}")
-                if items and self.echo_logged <= 2:
-                    log.info(f"sample row: {json.dumps(items[0])[:1500]}")
-            if understood:
-                if chosen != label:
-                    log.info(f"search request shape understood: {label} ({len(items)} rows)")
-                    self.search_variant = label
-                return items
-            if fallback is None:
-                fallback = items
-        if fallback is not None and not chosen:
-            log.warning("No request shape made the portal echo the search criteria "
-                        "(returning empty results)")
+                log.info(f"search[{label}] ignored the type filter: {len(good)}/{len(items)} rows are {code}")
+        if chosen is None and fallback is None:
+            log.warning(f"No request shape returned only {code} rows for {day}; dropping this search")
         return fallback
 
 
