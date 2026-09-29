@@ -68,7 +68,16 @@ LOOKBACK_DAYS = int(os.environ.get("LOOKBACK_DAYS", "7"))
 CLERK_BASE = os.environ.get(
     "CLERK_BASE_URL", "https://onlineservices.miamidadeclerk.gov/officialrecords"
 ).rstrip("/")
-CLERK_SEARCH_PAGE = f"{CLERK_BASE}/StandardSearch.aspx"
+# The portal is now a single-page app. The legacy StandardSearch.aspx URL is routed by the
+# client to ".../officialrecords/undefined" (blank page, no login link, API 404s), so the
+# SPA root is tried first and the legacy/hash routes only as fallbacks.
+CLERK_SEARCH_PAGES = [
+    f"{CLERK_BASE}/",
+    f"{CLERK_BASE}/#/standardsearch",
+    f"{CLERK_BASE}/standardsearch",
+    f"{CLERK_BASE}/StandardSearch.aspx",
+]
+CLERK_SEARCH_PAGE = CLERK_SEARCH_PAGES[0]
 CLERK_API = f"{CLERK_BASE}/api"
 
 CLERK_EMAIL = os.environ.get("CLERK_EMAIL", "")
@@ -882,12 +891,13 @@ class Enricher:
 # CLERK PORTAL (Playwright)
 # ─────────────────────────────────────────────────────────────────────────────
 FETCH_JS = """
-async ([url, method]) => {
+async ([url, method, body]) => {
   const ctl = new AbortController();
   const t = setTimeout(() => ctl.abort(), 55000);
   try {
     const r = await fetch(url, {
       method, credentials: 'include', signal: ctl.signal,
+      body: body === null || body === undefined ? undefined : body,
       headers: {'Accept': 'application/json, text/plain, */*',
                 'Content-Type': 'application/json; charset=utf-8'},
     });
@@ -918,6 +928,8 @@ class ClerkPortal:
         self.page = None
         self.network_strings: set = set()
         self.logged_in = None
+        self.api_base = CLERK_API
+        self.api_seen: list = []
 
     async def __aenter__(self):
         from playwright.async_api import async_playwright
@@ -935,12 +947,16 @@ class ClerkPortal:
             log.info("Added CLERK_SESSION cookie to browser")
         self.page = await self.context.new_page()
         self.page.on("response", self._sniff)
+        self.page.on("request", self._sniff_request)
         await self.open_search_page()
         self.logged_in = await self.check_login()
         if not self.logged_in and CLERK_EMAIL and CLERK_PASSWORD:
             await self.login()
             self.logged_in = await self.check_login()
-        log.info(f"Clerk session ready (logged in: {self.logged_in})")
+        log.info(f"Clerk session ready (logged in: {self.logged_in}) api_base={self.api_base}")
+        if self.logged_in is None:
+            for line in self.api_seen[:25]:
+                log.info(f"  portal call: {line}")
         return self
 
     async def __aexit__(self, *exc):
@@ -984,31 +1000,63 @@ class ClerkPortal:
         except Exception:  # noqa: BLE001
             pass
 
-    async def open_search_page(self):
-        for attempt in range(1, 4):
-            try:
-                await self.page.goto(CLERK_SEARCH_PAGE, wait_until="domcontentloaded",
-                                     timeout=60000)
-                try:
-                    await self.page.wait_for_load_state("networkidle", timeout=20000)
-                except Exception:  # noqa: BLE001
-                    pass
-                log.info(f"Opened search page: {self.page.url}")
-                return
-            except Exception as e:  # noqa: BLE001
-                log.warning(f"Search page load failed (attempt {attempt}): {e}")
-                await asyncio.sleep(5 * attempt)
-        await self.screenshot("search_page_failed")
-        raise RuntimeError("Could not open the clerk search page")
+    def _sniff_request(self, req):
+        """Learn the real API base from the portal's own XHR/fetch calls."""
+        try:
+            url = req.url
+            i = url.find("/api/")
+            if i > 0 and req.resource_type in ("xhr", "fetch"):
+                if len(self.api_seen) < 40:
+                    self.api_seen.append(f"{req.method} {url[:160]}")
+                base = url[:i + 4]
+                if base != self.api_base and base.startswith(CLERK_BASE.split("/officialrecords")[0]):
+                    log.info(f"Portal API base discovered: {base}")
+                    self.api_base = base
+        except Exception:  # noqa: BLE001
+            pass
 
-    async def api(self, method: str, path: str, params: dict | None = None) -> tuple:
-        url = f"{CLERK_API}/{path}"
+    async def _page_is_usable(self) -> bool:
+        url = self.page.url
+        if url.rstrip("/").lower().endswith("/undefined"):
+            return False
+        try:
+            body = (await self.page.evaluate(
+                "() => (document.body && document.body.innerText || '').trim().length"))
+        except Exception:  # noqa: BLE001
+            return False
+        return body > 50
+
+    async def open_search_page(self):
+        last_err = None
+        for attempt in range(1, 4):
+            for target in CLERK_SEARCH_PAGES:
+                try:
+                    await self.page.goto(target, wait_until="domcontentloaded", timeout=60000)
+                    try:
+                        await self.page.wait_for_load_state("networkidle", timeout=20000)
+                    except Exception:  # noqa: BLE001
+                        pass
+                    log.info(f"Opened {target} -> {self.page.url}")
+                    if await self._page_is_usable():
+                        CLERK_SEARCH_PAGES.sort(key=lambda t: t != target)  # remember winner
+                        return
+                    log.warning(f"Page at {self.page.url} looks empty/invalid – trying next route")
+                except Exception as e:  # noqa: BLE001
+                    last_err = e
+                    log.warning(f"Search page load failed ({target}, attempt {attempt}): {e}")
+            await asyncio.sleep(5 * attempt)
+        await self.screenshot("search_page_failed")
+        raise RuntimeError(f"Could not open the clerk search page ({last_err})")
+
+    async def api(self, method: str, path: str, params: dict | None = None,
+                  body: str | None = None) -> tuple:
+        url = f"{self.api_base}/{path}"
         if params:
             url += "?" + urllib.parse.urlencode(params, quote_via=urllib.parse.quote)
         last = (0, "")
         for attempt in range(1, 4):
             try:
-                res = await self.page.evaluate(FETCH_JS, [url, method])
+                res = await self.page.evaluate(FETCH_JS, [url, method, body])
                 last = (res["status"], res["text"])
             except Exception as e:  # noqa: BLE001  (page crashed / navigated)
                 last = (0, str(e))
@@ -1028,8 +1076,10 @@ class ClerkPortal:
                 break
         return last
 
+
     async def check_login(self):
-        status, text = await self.api("GET", "Environment/isLoggedIn")
+        status, text = await self.api("GET", "home/isLoggedIn")
+        log.info(f"isLoggedIn -> {status} {text[:120]}")
         if status != 200:
             return None
         try:
@@ -1059,6 +1109,14 @@ class ClerkPortal:
                     break
             if not clicked:
                 log.warning("No login link found on the search page")
+                try:
+                    links = await page.evaluate(
+                        "() => Array.from(document.querySelectorAll('a,button'))"
+                        ".map(e => (e.innerText||'').trim()).filter(Boolean).slice(0,40)")
+                    log.warning(f"Visible links/buttons: {links}")
+                except Exception:  # noqa: BLE001
+                    pass
+                await self.screenshot("no_login_link")
             await page.wait_for_selector("input[type=password]", timeout=30000)
             user = page.locator(
                 "input[type=email], input[name*='user' i], input[id*='user' i], "
@@ -1091,6 +1149,16 @@ class ClerkPortal:
                     strings.add(s)
         except Exception as e:  # noqa: BLE001
             log.warning(f"Doc-type discovery from page failed: {e}")
+        official = []
+        status, text = await self.api("GET", "home/documentTypes")
+        if status == 200:
+            try:
+                official = [x.strip() for x in json.loads(text) if isinstance(x, str) and x.strip()]
+            except Exception:  # noqa: BLE001
+                official = []
+        if official:
+            log.info(f"Portal document-type list ({len(official)}): {' | '.join(official)}")
+            strings = set(official)
         log.info(f"Discovered {len(strings)} portal document types")
         mapping = {code: [] for code in LEAD_TYPES}
         for s in sorted(strings):
@@ -1099,7 +1167,8 @@ class ClerkPortal:
                 mapping[code].append(s)
         for code, meta in LEAD_TYPES.items():
             for k in meta["known"]:
-                if k not in mapping[code]:
+                # with the official list, never search for a name the portal doesn't have
+                if k not in mapping[code] and not official:
                     mapping[code].append(k)
         for code, names in mapping.items():
             if names:
@@ -1109,7 +1178,17 @@ class ClerkPortal:
         return mapping
 
     # ── search ──────────────────────────────────────────────────────────────
+    @staticmethod
+    def _row_matches(item: dict, code: str) -> bool:
+        t = re.sub(r"\s+", " ", str(item.get("doC_TYPE") or item.get("doc_type") or "")).strip().upper()
+        return t.endswith(" - " + code.upper()) or t == code.upper()
+
     async def search_day(self, portal_type: str, day: str) -> list | None:
+        """Search one document type for one day, exactly as the portal's own web app does.
+
+        Returns [] when the portal reports no results (it answers isValidSearch:false /
+        qs:null for an empty search - that is NOT an auth failure) and None on real errors.
+        """
         params = {
             "partyName": "", "dateRangeFrom": day, "dateRangeTo": day,
             "documentType": portal_type, "searchT": portal_type,
@@ -1117,6 +1196,9 @@ class ClerkPortal:
         }
         status, text = await self.api("POST", "home/standardsearch", params)
         if status != 200:
+            self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
+            if self.invalid_logged <= 6:
+                log.warning(f"standardsearch HTTP {status} for {portal_type!r} {day}: {text[:300]}")
             return None
         try:
             d = json.loads(text)
@@ -1124,11 +1206,11 @@ class ClerkPortal:
             log.warning(f"standardsearch non-JSON: {text[:200]}")
             return None
         qs = d.get("qs") if isinstance(d, dict) else None
-        if not qs or (isinstance(d, dict) and d.get("isValidSearch") is False):
-            log.debug(f"standardsearch invalid for {portal_type} {day}: {text[:200]}")
-            return None
+        if not qs:
+            return []  # portal: "No results found"
         status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
         if status != 200:
+            log.warning(f"getStandardRecords HTTP {status} for {portal_type!r} {day}: {text[:200]}")
             return None
         try:
             d = json.loads(text)
@@ -1142,7 +1224,12 @@ class ClerkPortal:
                 if isinstance(d.get(k), list):
                     items = d[k]
                     break
-        return [i for i in items if isinstance(i, dict)]
+        items = [i for i in items if isinstance(i, dict)]
+        code = portal_type.rsplit(" - ", 1)[-1].strip()
+        good = [i for i in items if self._row_matches(i, code)]
+        if len(good) < len(items):
+            log.warning(f"{portal_type} {day}: dropped {len(items) - len(good)} rows of another type")
+        return good
 
 
 def classify_portal_type(name: str) -> str | None:
@@ -1365,9 +1452,9 @@ async def scrape_clerk(days: list) -> list:
                         if valid_searches == 0 and attempted >= 6:
                             await portal.screenshot("no_valid_searches")
                             raise AuthError(
-                                "The clerk portal rejected the first 6 searches. The session is not "
-                                "authorised – set CLERK_EMAIL/CLERK_PASSWORD (or refresh "
-                                "CLERK_SESSION) in GitHub Secrets.")
+                                "The clerk portal returned errors for the first 6 searches. Check the "
+                                "warnings above (HTTP status / login) and CLERK_EMAIL/"
+                                "CLERK_PASSWORD/CLERK_SESSION in GitHub Secrets.")
                         continue
                     valid_searches += 1
                     if len(items) >= RESULT_CAP_WARN:
@@ -1381,8 +1468,8 @@ async def scrape_clerk(days: list) -> list:
         if attempted and valid_searches == 0:
             await portal.screenshot("no_valid_searches")
             raise AuthError(
-                "The clerk portal rejected every search. The session is not authorised – "
-                "set CLERK_EMAIL/CLERK_PASSWORD (or refresh CLERK_SESSION) in GitHub Secrets.")
+                "The clerk portal returned errors for every search. Check the warnings above "
+                "and CLERK_EMAIL/CLERK_PASSWORD/CLERK_SESSION in GitHub Secrets.")
     log.info(f"Clerk rows collected: {len(parts)} ({valid_searches}/{attempted} searches OK)")
     return parts
 
