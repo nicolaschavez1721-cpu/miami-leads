@@ -1148,7 +1148,7 @@ class ClerkPortal:
                 try:
                     js = ("async ([u, h]) => { const r = await fetch(u, {method:'POST', credentials:'include', "
                           "headers: Object.assign({Accept:'application/json','content-type':'application/json; charset=utf-8'}, "
-                          "h ? {'x-recaptcha-token': ''} : {})}); return r.status + ' ' + (await r.text()).slice(0,160); }")
+                          "h ? {'x-recaptcha-token': ''} : {})}); return r.status + ' ' + (await r.text()); }")
                     url = (f"{self.api_base}/home/standardsearch?partyName=&dateRangeFrom={d1}&dateRangeTo={d2}"
                            f"&documentType={urllib.parse.quote(name)}&searchT={urllib.parse.quote(name)}"
                            f"&firstQuery=y&searchtype=Name/Document")
