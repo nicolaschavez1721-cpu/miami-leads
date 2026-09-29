@@ -1109,6 +1109,34 @@ class ClerkPortal:
                     await page.wait_for_timeout(2500)
             except Exception:  # noqa: BLE001
                 pass
+        try:
+            src = await page.evaluate(
+                "() => Array.from(document.querySelectorAll('script[src]')).map(s => s.src)"
+                ".filter(u => u.includes('/assets/'))")
+            log.info(f"PROBE bundles: {src}")
+            for u in src[:3]:
+                res = await page.evaluate(FETCH_JS, [u, "GET", None])
+                js = res["text"]
+                log.info(f"PROBE bundle {u} status={res['status']} len={len(js)}")
+                for term, n in (("standardsearch", 5), ("documentType", 4), ("searchT", 3),
+                                ("StandardSearch", 3)):
+                    hits = [m.start() for m in re.finditer(term, js)]
+                    log.info(f"PROBE term {term!r}: {len(hits)} hits")
+                    last = -10**9
+                    shown = 0
+                    for h in hits:
+                        if h - last < 900:
+                            continue
+                        last = h
+                        log.info(f"PROBE snippet[{term}@{h}]: {js[max(0, h-450):h+650]!r}")
+                        shown += 1
+                        if shown >= n:
+                            break
+        except Exception as e:  # noqa: BLE001
+            log.warning(f"PROBE bundle mining failed: {e}")
+        if (ROOT_DIR / "scraper" / "PROBE_ONLY").exists():
+            log.info("PROBE_ONLY set - stopping after the probe")
+            sys.exit(3)
         log.info("PROBE api calls seen: " + " ;; ".join(sorted(set(self.api_seen))[:40]))
         await self.screenshot("probe")
 
