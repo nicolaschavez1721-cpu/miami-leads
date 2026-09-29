@@ -1114,7 +1114,7 @@ class ClerkPortal:
                 "() => Array.from(document.querySelectorAll('script[src]')).map(s => s.src)"
                 ".filter(u => u.includes('/assets/'))")
             log.info(f"PROBE bundles: {src}")
-            for u in src[:3]:
+            for u in []:
                 res = await page.evaluate(FETCH_JS, [u, "GET", None])
                 js = res["text"]
                 log.info(f"PROBE bundle {u} status={res['status']} len={len(js)}")
@@ -1134,6 +1134,42 @@ class ClerkPortal:
                             break
         except Exception as e:  # noqa: BLE001
             log.warning(f"PROBE bundle mining failed: {e}")
+        # exact SPA-style requests: does isValidSearch:false just mean "no results"?
+        cases = [("LIS PENDENS - LIS", "2026-09-22", "2026-09-22"),
+                 ("LIS PENDENS - LIS", "2026-09-15", "2026-09-22"),
+                 ("CANCELLATION OF LIS PENDENS - CLP", "2026-09-22", "2026-09-22"),
+                 ("CANCELLATION OF LIS PENDENS - CLP", "2026-09-15", "2026-09-22"),
+                 ("LIEN - LIE", "2026-09-22", "2026-09-22"),
+                 ("JUDGEMENT - JUD", "2026-09-22", "2026-09-22"),
+                 ("NOTICE OF COMMENCEMENT - NCO", "2026-09-22", "2026-09-22"),
+                 ("DEED - DEE", "2026-09-22", "2026-09-22")]
+        for name, d1, d2 in cases:
+            for hdr in (False, True):
+                try:
+                    js = ("async ([u, h]) => { const r = await fetch(u, {method:'POST', credentials:'include', "
+                          "headers: Object.assign({Accept:'application/json','content-type':'application/json; charset=utf-8'}, "
+                          "h ? {'x-recaptcha-token': ''} : {})}); return r.status + ' ' + (await r.text()).slice(0,160); }")
+                    url = (f"{self.api_base}/home/standardsearch?partyName=&dateRangeFrom={d1}&dateRangeTo={d2}"
+                           f"&documentType={urllib.parse.quote(name)}&searchT={urllib.parse.quote(name)}"
+                           f"&firstQuery=y&searchtype=Name/Document")
+                    out = await page.evaluate(js, [url, hdr])
+                    qs = None
+                    try:
+                        qs = json.loads(out.split(" ", 1)[1]).get("qs")
+                    except Exception:  # noqa: BLE001
+                        pass
+                    n = "-"
+                    if qs:
+                        r2 = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
+                        try:
+                            rm = json.loads(r2[1]).get("recordingModels") or []
+                            types = Counter(re.sub(r"\s+", " ", str(x.get("doC_TYPE"))) for x in rm)
+                            n = f"{len(rm)} rows types={types.most_common(3)}"
+                        except Exception:  # noqa: BLE001
+                            n = f"records? {r2[1][:100]}"
+                    log.info(f"PROBE2 {name!r} {d1}..{d2} hdr={hdr}: {out[:120]} -> {n}")
+                except Exception as e:  # noqa: BLE001
+                    log.info(f"PROBE2 {name!r} failed: {e}")
         if (ROOT_DIR / "scraper" / "PROBE_ONLY").exists():
             log.info("PROBE_ONLY set - stopping after the probe")
             sys.exit(3)
