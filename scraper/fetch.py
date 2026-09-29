@@ -1004,8 +1004,6 @@ class ClerkPortal:
         """Learn the real API base from the portal's own XHR/fetch calls."""
         try:
             url = req.url
-            if "standardsearch" in url.lower() and req.method != "GET":
-                log.info(f"PORTAL OWN SEARCH REQUEST: {req.method} {url[:300]} body={str(req.post_data)[:400]}")
             i = url.find("/api/")
             if i > 0 and req.resource_type in ("xhr", "fetch"):
                 if len(self.api_seen) < 40:
@@ -1078,103 +1076,6 @@ class ClerkPortal:
                 break
         return last
 
-
-    async def probe(self):
-        """One-off diagnostics: what does the portal's own search UI / lookup API look like?"""
-        page = self.page
-        try:
-            ctrls = await page.evaluate("""() => Array.from(document.querySelectorAll(
-                'input,select,textarea,button,a,[role=tab],[role=combobox],label'))
-                .map(e => [e.tagName, e.type||'', e.name||'', e.id||'', e.placeholder||'',
-                           e.getAttribute('aria-label')||'', (e.innerText||'').trim().slice(0,40),
-                           e.getAttribute('href')||''].join('|')).slice(0,120)""")
-            log.info("PROBE controls: " + " ;; ".join(ctrls))
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"PROBE controls failed: {e}")
-        for path in ["home/getDocumentTypes", "home/documentTypes", "home/GetDocumentTypes",
-                     "settings/documentTypes", "settings/getDocumentTypes", "lookup/documentTypes",
-                     "Lookup/DocumentTypes", "home/getDocTypes", "search/documentTypes",
-                     "home/getSearchTypes", "home/GetDate"]:
-            try:
-                res = await page.evaluate(FETCH_JS, [f"{self.api_base}/{path}", "GET", None])
-                log.info(f"PROBE {path} -> {res['status']} len={len(res['text'])} {res['text'][:300]}")
-            except Exception as e:  # noqa: BLE001
-                log.info(f"PROBE {path} failed: {e}")
-        for sel in ["text=/standard search/i", "text=/name.*document/i", "text=/document type/i"]:
-            try:
-                loc = page.locator(sel).first
-                if await loc.count():
-                    log.info(f"PROBE found UI element {sel}")
-                    await loc.click(timeout=3000)
-                    await page.wait_for_timeout(2500)
-            except Exception:  # noqa: BLE001
-                pass
-        try:
-            src = await page.evaluate(
-                "() => Array.from(document.querySelectorAll('script[src]')).map(s => s.src)"
-                ".filter(u => u.includes('/assets/'))")
-            log.info(f"PROBE bundles: {src}")
-            for u in []:
-                res = await page.evaluate(FETCH_JS, [u, "GET", None])
-                js = res["text"]
-                log.info(f"PROBE bundle {u} status={res['status']} len={len(js)}")
-                for term, n in (("standardsearch", 5), ("documentType", 4), ("searchT", 3),
-                                ("StandardSearch", 3)):
-                    hits = [m.start() for m in re.finditer(term, js)]
-                    log.info(f"PROBE term {term!r}: {len(hits)} hits")
-                    last = -10**9
-                    shown = 0
-                    for h in hits:
-                        if h - last < 900:
-                            continue
-                        last = h
-                        log.info(f"PROBE snippet[{term}@{h}]: {js[max(0, h-450):h+650]!r}")
-                        shown += 1
-                        if shown >= n:
-                            break
-        except Exception as e:  # noqa: BLE001
-            log.warning(f"PROBE bundle mining failed: {e}")
-        # exact SPA-style requests: does isValidSearch:false just mean "no results"?
-        cases = [("LIS PENDENS - LIS", "2026-09-22", "2026-09-22"),
-                 ("LIS PENDENS - LIS", "2026-09-15", "2026-09-22"),
-                 ("CANCELLATION OF LIS PENDENS - CLP", "2026-09-22", "2026-09-22"),
-                 ("CANCELLATION OF LIS PENDENS - CLP", "2026-09-15", "2026-09-22"),
-                 ("LIEN - LIE", "2026-09-22", "2026-09-22"),
-                 ("JUDGEMENT - JUD", "2026-09-22", "2026-09-22"),
-                 ("NOTICE OF COMMENCEMENT - NCO", "2026-09-22", "2026-09-22"),
-                 ("DEED - DEE", "2026-09-22", "2026-09-22")]
-        for name, d1, d2 in cases:
-            for hdr in (False, True):
-                try:
-                    js = ("async ([u, h]) => { const r = await fetch(u, {method:'POST', credentials:'include', "
-                          "headers: Object.assign({Accept:'application/json','content-type':'application/json; charset=utf-8'}, "
-                          "h ? {'x-recaptcha-token': ''} : {})}); return r.status + ' ' + (await r.text()); }")
-                    url = (f"{self.api_base}/home/standardsearch?partyName=&dateRangeFrom={d1}&dateRangeTo={d2}"
-                           f"&documentType={urllib.parse.quote(name)}&searchT={urllib.parse.quote(name)}"
-                           f"&firstQuery=y&searchtype=Name/Document")
-                    out = await page.evaluate(js, [url, hdr])
-                    qs = None
-                    try:
-                        qs = json.loads(out.split(" ", 1)[1]).get("qs")
-                    except Exception:  # noqa: BLE001
-                        pass
-                    n = "-"
-                    if qs:
-                        r2 = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
-                        try:
-                            rm = json.loads(r2[1]).get("recordingModels") or []
-                            types = Counter(re.sub(r"\s+", " ", str(x.get("doC_TYPE"))) for x in rm)
-                            n = f"{len(rm)} rows types={types.most_common(3)}"
-                        except Exception:  # noqa: BLE001
-                            n = f"records? {r2[1][:100]}"
-                    log.info(f"PROBE2 {name!r} {d1}..{d2} hdr={hdr}: {out[:120]} -> {n}")
-                except Exception as e:  # noqa: BLE001
-                    log.info(f"PROBE2 {name!r} failed: {e}")
-        if (ROOT_DIR / "scraper" / "PROBE_ONLY").exists():
-            log.info("PROBE_ONLY set - stopping after the probe")
-            sys.exit(3)
-        log.info("PROBE api calls seen: " + " ;; ".join(sorted(set(self.api_seen))[:40]))
-        await self.screenshot("probe")
 
     async def check_login(self):
         status, text = await self.api("GET", "home/isLoggedIn")
@@ -1277,88 +1178,58 @@ class ClerkPortal:
         return mapping
 
     # ── search ──────────────────────────────────────────────────────────────
-    def _search_variants(self, portal_type: str, day: str):
-        """Yield (label, params, body) request shapes; the verified one is remembered."""
-        y, m, dd = day.split("-")
-        code = portal_type.rsplit(" - ", 1)[-1].strip()
-        dates = {"iso": day, "mdy": f"{m}/{dd}/{y}"}
-        pairs = {"code+code": (code, code), "code+name": (code, portal_type),
-                 "name+name": (portal_type, portal_type), "name+code": (portal_type, code),
-                 "code+none": (code, ""), "name+none": (portal_type, "")}
-        for dl, dv in dates.items():
-            for pl, (dt, st) in pairs.items():
-                p = {"partyName": "", "dateRangeFrom": dv, "dateRangeTo": dv,
-                     "documentType": dt, "searchT": st,
-                     "firstQuery": "y", "searchtype": "Name/Document"}
-                yield f"query/{dl}/{pl}", p, None
-                yield f"both/{dl}/{pl}", p, json.dumps(p)
-
-    async def _run_search(self, params, body):
-        """One standardsearch + getStandardRecords round trip -> (items, criteria, note)."""
-        status, text = await self.api("POST", "home/standardsearch", params, body)
-        if status != 200:
-            return None, None, f"HTTP {status}: {text[:200]}"
-        try:
-            d = json.loads(text)
-        except Exception:  # noqa: BLE001
-            return None, None, f"non-JSON: {text[:200]}"
-        qs = d.get("qs") if isinstance(d, dict) else None
-        if not qs or d.get("isValidSearch") is False:
-            return None, None, f"not accepted: {text[:200]}"
-        status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
-        if status != 200:
-            return None, None, f"records HTTP {status}: {text[:200]}"
-        try:
-            d = json.loads(text)
-        except Exception:  # noqa: BLE001
-            return None, None, f"records non-JSON: {text[:200]}"
-        items, crit = [], {}
-        if isinstance(d, list):
-            items = d
-        elif isinstance(d, dict):
-            crit = d.get("searchCritiriea") or d.get("searchCriteria") or {}
-            for k in ("recordingModels", "records", "results", "data", "items"):
-                if isinstance(d.get(k), list):
-                    items = d[k]
-                    break
-        return [i for i in items if isinstance(i, dict)], crit, ""
-
     @staticmethod
     def _row_matches(item: dict, code: str) -> bool:
         t = re.sub(r"\s+", " ", str(item.get("doC_TYPE") or item.get("doc_type") or "")).strip().upper()
         return t.endswith(" - " + code.upper()) or t == code.upper()
 
     async def search_day(self, portal_type: str, day: str) -> list | None:
+        """Search one document type for one day, exactly as the portal's own web app does.
+
+        Returns [] when the portal reports no results (it answers isValidSearch:false /
+        qs:null for an empty search - that is NOT an auth failure) and None on real errors.
+        """
+        params = {
+            "partyName": "", "dateRangeFrom": day, "dateRangeTo": day,
+            "documentType": portal_type, "searchT": portal_type,
+            "firstQuery": "y", "searchtype": "Name/Document",
+        }
+        status, text = await self.api("POST", "home/standardsearch", params)
+        if status != 200:
+            self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
+            if self.invalid_logged <= 6:
+                log.warning(f"standardsearch HTTP {status} for {portal_type!r} {day}: {text[:300]}")
+            return None
+        try:
+            d = json.loads(text)
+        except Exception:  # noqa: BLE001
+            log.warning(f"standardsearch non-JSON: {text[:200]}")
+            return None
+        qs = d.get("qs") if isinstance(d, dict) else None
+        if not qs:
+            return []  # portal: "No results found"
+        status, text = await self.api("GET", "SearchResults/getStandardRecords", {"qs": qs})
+        if status != 200:
+            log.warning(f"getStandardRecords HTTP {status} for {portal_type!r} {day}: {text[:200]}")
+            return None
+        try:
+            d = json.loads(text)
+        except Exception:  # noqa: BLE001
+            return None
+        items = []
+        if isinstance(d, list):
+            items = d
+        elif isinstance(d, dict):
+            for k in ("recordingModels", "records", "results", "data", "items"):
+                if isinstance(d.get(k), list):
+                    items = d[k]
+                    break
+        items = [i for i in items if isinstance(i, dict)]
         code = portal_type.rsplit(" - ", 1)[-1].strip()
-        chosen = getattr(self, "search_variant", None)
-        variants = list(self._search_variants(portal_type, day))
-        if chosen:
-            variants = [v for v in variants if v[0] == chosen] or variants
-        fallback = None
-        for label, params, body in variants:
-            items, crit, note = await self._run_search(params, body)
-            if items is None:
-                self.invalid_logged = getattr(self, "invalid_logged", 0) + 1
-                if self.invalid_logged <= 6:
-                    log.warning(f"search[{label}] {portal_type!r} {day}: {note}")
-                continue
-            if not items:
-                if fallback is None:
-                    fallback = items          # genuinely empty (or unverifiable) day
-                continue
-            good = [i for i in items if self._row_matches(i, code)]
-            if len(good) >= 0.9 * len(items):
-                if chosen != label:
-                    log.info(f"search request shape VERIFIED: {label} "
-                             f"({len(good)}/{len(items)} rows are {code})")
-                    self.search_variant = label
-                return good
-            self.echo_logged = getattr(self, "echo_logged", 0) + 1
-            if self.echo_logged <= 6:
-                log.info(f"search[{label}] ignored the type filter: {len(good)}/{len(items)} rows are {code}")
-        if chosen is None and fallback is None:
-            log.warning(f"No request shape returned only {code} rows for {day}; dropping this search")
-        return fallback
+        good = [i for i in items if self._row_matches(i, code)]
+        if len(good) < len(items):
+            log.warning(f"{portal_type} {day}: dropped {len(items) - len(good)} rows of another type")
+        return good
 
 
 def classify_portal_type(name: str) -> str | None:
@@ -1566,7 +1437,6 @@ def stack_flags(records: list):
 async def scrape_clerk(days: list) -> list:
     parts, valid_searches, attempted = [], 0, 0
     async with ClerkPortal() as portal:
-        await portal.probe()
         mapping = await portal.discover_types()
         for code, portal_types in mapping.items():
             code_parts = 0
@@ -1582,9 +1452,9 @@ async def scrape_clerk(days: list) -> list:
                         if valid_searches == 0 and attempted >= 6:
                             await portal.screenshot("no_valid_searches")
                             raise AuthError(
-                                "The clerk portal rejected the first 6 searches. The session is not "
-                                "authorised – set CLERK_EMAIL/CLERK_PASSWORD (or refresh "
-                                "CLERK_SESSION) in GitHub Secrets.")
+                                "The clerk portal returned errors for the first 6 searches. Check the "
+                                "warnings above (HTTP status / login) and CLERK_EMAIL/"
+                                "CLERK_PASSWORD/CLERK_SESSION in GitHub Secrets.")
                         continue
                     valid_searches += 1
                     if len(items) >= RESULT_CAP_WARN:
@@ -1598,8 +1468,8 @@ async def scrape_clerk(days: list) -> list:
         if attempted and valid_searches == 0:
             await portal.screenshot("no_valid_searches")
             raise AuthError(
-                "The clerk portal rejected every search. The session is not authorised – "
-                "set CLERK_EMAIL/CLERK_PASSWORD (or refresh CLERK_SESSION) in GitHub Secrets.")
+                "The clerk portal returned errors for every search. Check the warnings above "
+                "and CLERK_EMAIL/CLERK_PASSWORD/CLERK_SESSION in GitHub Secrets.")
     log.info(f"Clerk rows collected: {len(parts)} ({valid_searches}/{attempted} searches OK)")
     return parts
 
