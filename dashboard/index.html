@@ -143,10 +143,13 @@
   select:focus { border-color: var(--accent); }
 
   /* ── TABLE ── */
-  .table-wrap { overflow-x: auto; border: 1px solid var(--border); border-radius: var(--radius); }
+  /* The wrapper is the scroll container (both axes) so the header row can stick to its
+     top; sticky on <thead> inside an overflow-x box floated over the first rows. */
+  .table-wrap { overflow: auto; max-height: calc(100vh - 150px);
+                border: 1px solid var(--border); border-radius: var(--radius); }
   table { width: 100%; border-collapse: collapse; }
-  thead { position: sticky; top: 61px; z-index: 10; }
   th {
+    position: sticky; top: 0; z-index: 10;
     background: #0d1014;
     padding: 10px 14px;
     text-align: left;

@@ -150,10 +150,13 @@ LEAD_TYPES: "OrderedDict[str, dict]" = OrderedDict([
                       known=[])),
     ("JUD",      dict(label="Judgment", cat="judgment",
                       pat=r"^(FINAL )?JUDG(E)?MENT\b", known=["JUDGEMENT - JUD"])),
+    # FTL (Federal Tax Lien) is the direct IRS-lien match. NTL and LIE are checked by
+    # grantor in refine_type() and promoted to LNIRS when the IRS is the lienholder.
     ("LNIRS",    dict(label="IRS Lien", cat="tax-lien",
-                      pat=r"\bIRS\b|INTERNAL REVENUE", known=[])),
+                      pat=r"\bIRS\b|INTERNAL REVENUE|FEDERAL TAX LIEN",
+                      known=["FEDERAL TAX LIEN - FTL"])),
     ("LNFED",    dict(label="Federal Lien", cat="tax-lien",
-                      pat=r"FEDERAL.*LIEN", known=["FEDERAL TAX LIEN - FTL"])),
+                      pat=r"FEDERAL.*LIEN", known=[])),
     ("LNCORPTX", dict(label="Corp Tax Lien", cat="tax-lien",
                       pat=r"NOTICE OF TAX LIEN|CORP.*TAX|STATE TAX LIEN|DEPARTMENT OF REVENUE|TAX WARRANT",
                       known=["NOTICE OF TAX LIEN - NTL"])),
@@ -1326,19 +1329,31 @@ def group_documents(parts: list) -> list:
     return list(docs.values())
 
 
+IRS_PARTY_RE = re.compile(
+    r"INTERNAL REVENUE|\bIRS\b|\bI R S\b|DEPT\.? OF (THE )?TREASURY|DEPARTMENT OF (THE )?TREASURY|"
+    r"U ?S TREASURY|UNITED STATES OF AMERICA|UNITED STATES GOVERNMENT")
+
+
 def refine_type(doc: dict) -> str:
-    """Sharpen generic lien codes using the parties involved."""
+    """Sharpen generic lien codes using the parties (grantor) involved.
+
+    * LIE (LN) is a catch-all for other liens: IRS as a party -> IRS lien,
+      otherwise HOA / Medicaid.
+    * NTL (LNCORPTX) can be federal or Florida Dept. of Revenue: IRS as a party ->
+      IRS lien, otherwise it stays a state / corporate tax lien.
+    * FTL is already an IRS lien by document type.
+    """
     code = doc["doc_type"]
     everyone = " | ".join(doc["p1"] + doc["p2"]).upper()
+    if code in ("LN", "LNCORPTX", "LNFED") and IRS_PARTY_RE.search(everyone):
+        return "LNIRS"
+    if code == "LNFED" and re.search(r"UNITED STATES", everyone):
+        return "LNIRS"
     if code == "LN":
         if ASSOC_RE.search(everyone):
             return "LNHOA"
         if re.search(r"MEDICAID|AGENCY FOR HEALTH|\bAHCA\b", everyone):
             return "MEDLN"
-        if re.search(r"INTERNAL REVENUE|\bIRS\b", everyone):
-            return "LNIRS"
-    if code == "LNFED" and re.search(r"INTERNAL REVENUE|\bIRS\b|UNITED STATES", everyone):
-        return "LNIRS"
     return code
 
 
@@ -1373,6 +1388,8 @@ def compute_flags(rec: dict, doc: dict) -> list:
         flags.append("Judgment lien")
     if code in ("LNCORPTX", "LNIRS", "LNFED", "TAXDEED"):
         flags.append("Tax lien")
+    if code == "LNIRS":
+        flags.append("IRS lien")
     if code in ("LNMECH", "LN"):
         flags.append("Mechanic lien")
     if code == "LNHOA":
