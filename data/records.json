@@ -1,9 +1,9 @@
 {
-  "fetched_at": "2026-10-31T13:19:19Z",
+  "fetched_at": "2026-11-01T14:03:22Z",
   "source": "Miami-Dade Clerk of Courts Official Records + Property Appraiser parcel roll",
   "date_range": {
-    "from": "2026-10-24",
-    "to": "2026-10-31"
+    "from": "2026-10-25",
+    "to": "2026-11-01"
   },
   "total": 2054,
   "with_address": 856,
